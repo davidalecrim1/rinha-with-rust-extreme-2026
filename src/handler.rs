@@ -35,7 +35,11 @@ pub async fn fraud_score(
     Json(req): Json<FraudRequest>,
 ) -> Json<FraudResponse> {
     let vector = vectorize(&req, &s.norm, &s.mcc_risk);
-    let fraud_score = s.index.search(&vector);
+    // Offload the CPU-bound KNN scan so the tokio thread stays free for I/O.
+    // On panic, default to fraud (score=1.0, approved=false) — avoids HTTP 500 weight-5 penalty.
+    let fraud_score = tokio::task::spawn_blocking(move || s.index.search(&vector))
+        .await
+        .unwrap_or(1.0);
     Json(FraudResponse {
         approved: fraud_score < FRAUD_THRESHOLD,
         fraud_score,

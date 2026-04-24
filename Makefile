@@ -1,6 +1,6 @@
 DOCKER_IMAGE := davidalecrim1/rinha-rust-2026
 
-.PHONY: lint run test release
+.PHONY: lint run test release load-test
 
 lint:
 	cargo fmt --check
@@ -11,6 +11,14 @@ test:
 
 run:
 	docker compose -f docker-compose.local.yml up --build -d
+
+load-test: run
+	@echo "Waiting for stack to be ready..."
+	@until curl -sf http://localhost:9999/ready >/dev/null 2>&1; do sleep 1; done
+	@echo "Stack ready. Running load test..."
+	$(eval CURRENT_TAG := $(shell git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1))
+	@mkdir -p scripts/results
+	k6 run --env VERSION=$(CURRENT_TAG) scripts/load-test.js
 
 # Increments the patch version, tags, pushes to git, builds the linux/amd64
 # release image, publishes it to Docker Hub, and updates the submission branch
@@ -38,3 +46,5 @@ release:
 	@cd /tmp/rinha-submission && git add -A && git commit -m "release $(VERSION)" && git push -u origin submission
 	@git worktree remove /tmp/rinha-submission
 	@echo "Released $(VERSION) — submission branch updated"
+	@echo ""
+	@echo "Don't forget: add an entry for $(VERSION) to CHANGELOG.md (max 3 bullet points)"
