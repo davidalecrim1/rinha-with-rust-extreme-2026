@@ -173,6 +173,160 @@ mod tests {
         }
     }
 
+    // Real example payloads with last_transaction set, expected vectors computed from
+    // the reference Python implementation of the spec formulas.
+
+    #[test]
+    fn vectorize_tx_3576980410_legit_with_last_tx() {
+        let mut mcc_risk = HashMap::new();
+        mcc_risk.insert("5912".to_string(), 0.20f32);
+
+        let req = FraudRequest {
+            id: "tx-3576980410".to_string(),
+            transaction: Transaction {
+                amount: 384.88,
+                installments: 3,
+                requested_at: dt("2026-03-11T20:23:35Z"),
+            },
+            customer: Customer {
+                avg_amount: 769.76,
+                tx_count_24h: 3,
+                known_merchants: vec![
+                    "MERC-009".to_string(),
+                    "MERC-009".to_string(),
+                    "MERC-001".to_string(),
+                    "MERC-001".to_string(),
+                ],
+            },
+            merchant: Merchant {
+                id: "MERC-001".to_string(),
+                mcc: "5912".to_string(),
+                avg_amount: 298.95,
+            },
+            terminal: Terminal {
+                is_online: false,
+                card_present: true,
+                km_from_home: 13.7090520965,
+            },
+            last_transaction: Some(LastTransaction {
+                timestamp: dt("2026-03-11T14:58:35Z"), // 325 min before
+                km_from_current: 18.8626479774,
+            }),
+        };
+
+        let v = vectorize(&req, &norm(), &mcc_risk);
+        let expected: [f32; 14] = [
+            0.038488, 0.25, 0.05, 0.869565, 0.333333,
+            0.225694, 0.018863, 0.013709, 0.15, 0.0,
+            1.0, 0.0, 0.20, 0.029895,
+        ];
+
+        for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
+            assert!(approx_eq(got, exp), "dim {i}: got {got:.6} expected {exp:.6}");
+        }
+    }
+
+    #[test]
+    fn vectorize_tx_1788243118_fraud_online_no_card_large_km() {
+        let mut mcc_risk = HashMap::new();
+        mcc_risk.insert("7801".to_string(), 0.80f32);
+
+        let req = FraudRequest {
+            id: "tx-1788243118".to_string(),
+            transaction: Transaction {
+                amount: 4368.82,
+                installments: 8,
+                requested_at: dt("2026-03-17T02:04:06Z"),
+            },
+            customer: Customer {
+                avg_amount: 68.88,
+                tx_count_24h: 18,
+                known_merchants: vec![
+                    "MERC-004".to_string(),
+                    "MERC-004".to_string(),
+                    "MERC-015".to_string(),
+                    "MERC-017".to_string(),
+                    "MERC-007".to_string(),
+                ],
+            },
+            merchant: Merchant {
+                id: "MERC-062".to_string(),
+                mcc: "7801".to_string(),
+                avg_amount: 25.55,
+            },
+            terminal: Terminal {
+                is_online: true,
+                card_present: false,
+                km_from_home: 881.6139684714,
+            },
+            last_transaction: Some(LastTransaction {
+                timestamp: dt("2026-03-17T01:58:06Z"), // 6 min before
+                km_from_current: 660.9200962961,
+            }),
+        };
+
+        let v = vectorize(&req, &norm(), &mcc_risk);
+        let expected: [f32; 14] = [
+            0.436882, 0.666667, 1.0, 0.086957, 0.166667,
+            0.004167, 0.660920, 0.881614, 0.9, 1.0,
+            0.0, 1.0, 0.80, 0.002555,
+        ];
+
+        for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
+            assert!(approx_eq(got, exp), "dim {i}: got {got:.6} expected {exp:.6}");
+        }
+    }
+
+    #[test]
+    fn vectorize_tx_2174907811_partial_score() {
+        let mut mcc_risk = HashMap::new();
+        mcc_risk.insert("7802".to_string(), 0.75f32);
+
+        let req = FraudRequest {
+            id: "tx-2174907811".to_string(),
+            transaction: Transaction {
+                amount: 1265.15,
+                installments: 6,
+                requested_at: dt("2026-03-25T19:00:34Z"),
+            },
+            customer: Customer {
+                avg_amount: 349.94,
+                tx_count_24h: 5,
+                known_merchants: vec![
+                    "MERC-014".to_string(),
+                    "MERC-001".to_string(),
+                    "MERC-008".to_string(),
+                    "MERC-003".to_string(),
+                ],
+            },
+            merchant: Merchant {
+                id: "MERC-031".to_string(),
+                mcc: "7802".to_string(),
+                avg_amount: 107.11,
+            },
+            terminal: Terminal {
+                is_online: true,
+                card_present: false,
+                km_from_home: 136.5069519371,
+            },
+            last_transaction: Some(LastTransaction {
+                timestamp: dt("2026-03-25T17:09:34Z"), // 111 min before
+                km_from_current: 131.6216524485,
+            }),
+        };
+
+        let v = vectorize(&req, &norm(), &mcc_risk);
+        let expected: [f32; 14] = [
+            0.126515, 0.5, 0.361533, 0.826087, 0.333333,
+            0.077083, 0.131622, 0.136507, 0.25, 1.0,
+            0.0, 1.0, 0.75, 0.010711,
+        ];
+
+        for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
+            assert!(approx_eq(got, exp), "dim {i}: got {got:.6} expected {exp:.6}");
+        }
+    }
+
     #[test]
     fn vectorize_with_last_transaction() {
         let mcc_risk = HashMap::new();
