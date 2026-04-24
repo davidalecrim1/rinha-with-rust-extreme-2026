@@ -6,6 +6,14 @@ const testData = new SharedArray('payloads', function () {
     return JSON.parse(open('../../rinha-de-backend-2026/test/test-data.json')).entries;
 });
 
+const MAX_VUS = 200;
+const STAGES = [
+    { duration: '10s', target: 750  }, // ramp to half-peak
+    { duration: '10s', target: 1500 }, // ramp to full peak
+    { duration: '40s', target: 1500 }, // sustain
+];
+const TOTAL_SECS = STAGES.reduce((sum, s) => sum + parseInt(s.duration), 0);
+
 export const options = {
     summaryTrendStats: ['p(99)', 'p(95)'],
     scenarios: {
@@ -14,13 +22,9 @@ export const options = {
             startRate: 1,
             timeUnit: '1s',
             preAllocatedVUs: 50,
-            maxVUs: 200,
+            maxVUs: MAX_VUS,
             gracefulStop: '5s',
-            stages: [
-                { duration: '10s', target: 750  }, // ramp to half-peak
-                { duration: '10s', target: 1500 }, // ramp to full peak
-                { duration: '40s', target: 1500 }, // sustain
-            ],
+            stages: STAGES,
         },
     },
 };
@@ -39,7 +43,8 @@ export function handleSummary(data) {
     const version = __ENV.VERSION || 'unknown';
     const now = new Date();
     const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const filename = `scripts/results/${ts}_${version}.json`;
+
+    const filename = `scripts/results/${ts}_${version}_${MAX_VUS}vus_${TOTAL_SECS}s.json`;
 
     const dur = data.metrics.http_req_duration.values;
     const failed = data.metrics.http_req_failed.values;
