@@ -1,6 +1,6 @@
 DOCKER_IMAGE := davidalecrim1/rinha-rust-2026
 
-.PHONY: lint run test release load-test
+.PHONY: lint run test release load-test profile
 
 lint:
 	cargo fmt --check
@@ -19,6 +19,22 @@ load-test: run
 	$(eval CURRENT_TAG := $(shell git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1))
 	@mkdir -p scripts/results
 	k6 run --env VERSION=$(CURRENT_TAG) scripts/load-test.js
+
+profile:
+	@mkdir -p profile-api1 profile-api2
+	docker compose -f docker-compose.local.yml -f docker-compose.profile.yml up --build -d
+	@echo "Waiting for stack to be ready..."
+	@until curl -sf http://localhost:9999/ready >/dev/null 2>&1; do sleep 1; done
+	@echo "Stack ready. Running load test..."
+	$(eval CURRENT_TAG := $(shell git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1))
+	@mkdir -p scripts/results
+	k6 run --env VERSION=$(CURRENT_TAG) scripts/load-test.js
+	@echo "Stopping containers to flush profile data..."
+	docker compose -f docker-compose.local.yml -f docker-compose.profile.yml stop api1 api2
+	@echo ""
+	@echo "=== Profile data ==="
+	@echo "Collapsed stacks: profile-api1/profile.folded, profile-api2/profile.folded"
+	@echo "Flamegraph SVGs:  profile-api1/profile.svg, profile-api2/profile.svg"
 
 # Increments the patch version, tags, pushes to git, builds the linux/amd64
 # release image, publishes it to Docker Hub, and updates the submission branch

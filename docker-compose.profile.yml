@@ -1,0 +1,16 @@
+services:
+  api1:
+    build:
+      args:
+        CARGO_PROFILE: profiling
+        CARGO_FEATURES: profiling
+    volumes:
+      - ./profile-api1:/profile
+
+  api2:
+    build:
+      args:
+        CARGO_PROFILE: profiling
+        CARGO_FEATURES: profiling
+    volumes:
+      - ./profile-api2:/profile

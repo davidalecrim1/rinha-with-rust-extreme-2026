@@ -3,16 +3,25 @@ name = "rinha"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+profiling = ["dep:pprof"]
+
 [dependencies]
 axum       = "0.7"
-tokio      = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2     = "1"
 chrono     = { version = "0.4", default-features = false, features = ["std", "serde"] }
+pprof      = { version = "0.14", features = ["flamegraph", "protobuf-codec"], optional = true }
 
 [profile.release]
 opt-level     = 3
 lto           = true
 codegen-units = 1
 strip         = true
+
+[profile.profiling]
+inherits      = "release"
+debug         = true
+strip         = false

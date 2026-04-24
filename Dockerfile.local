@@ -4,10 +4,13 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src       ./src
 COPY resources ./resources
-RUN cargo build --release
+ARG CARGO_PROFILE=release
+ARG CARGO_FEATURES=
+RUN RUSTFLAGS="-C target-feature=+avx2,+fma" cargo build --profile ${CARGO_PROFILE} ${CARGO_FEATURES:+--features $CARGO_FEATURES}
 
 FROM alpine:latest
 RUN apk add --no-cache wget
-COPY --from=builder /app/target/release/rinha /rinha
+ARG CARGO_PROFILE=release
+COPY --from=builder /app/target/${CARGO_PROFILE}/rinha /rinha
 EXPOSE 8080
 ENTRYPOINT ["/rinha"]
