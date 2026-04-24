@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.2
+- Add k6 load test script, replace shell-based example-payloads with Python
+- Include VUs and duration in load test result filenames
+
 ## v0.1.1
 - Offload KNN search to `spawn_blocking` — frees tokio thread for I/O under concurrent load
 - Set `worker_processes 1` in nginx — prevents CPU starvation with 0.05 CPU budget
