@@ -12,6 +12,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tokio::net::TcpListener;
 use types::NormConsts;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() {
     let gz = include_bytes!("../resources/references.json.gz");
@@ -86,6 +89,15 @@ async fn main() {
         guard_ref
     };
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let socket_path = std::env::var("UNIX_SOCKET").unwrap_or_default();
+    if !socket_path.is_empty() {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind unix socket");
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))
+            .expect("set socket permissions");
+        axum::serve(listener, app).await.unwrap();
+    } else {
+        let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
+        axum::serve(listener, app).await.unwrap();
+    }
 }
