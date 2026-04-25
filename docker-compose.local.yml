@@ -21,8 +21,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.local
-      platforms:
-        - linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
     volumes:
@@ -42,8 +40,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.local
-      platforms:
-        - linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
     volumes:
