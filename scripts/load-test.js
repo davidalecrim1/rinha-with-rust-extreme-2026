@@ -3,7 +3,7 @@ import { check } from 'k6';
 import { SharedArray } from 'k6/data';
 
 const testData = new SharedArray('payloads', function () {
-    return JSON.parse(open('../../rinha-de-backend-2026/test/test-data.json')).entries;
+    return JSON.parse(open('./test-data.json')).entries;
 });
 
 const MAX_VUS = 200;

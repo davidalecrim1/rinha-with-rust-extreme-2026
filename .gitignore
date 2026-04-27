@@ -2,3 +2,4 @@ target/
 profile-api1/
 profile-api2/
 .DS_Store
+scripts/test-data.json
