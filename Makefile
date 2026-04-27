@@ -38,12 +38,13 @@ profile:
 	@echo "Collapsed stacks: profile-api1/profile.folded, profile-api2/profile.folded"
 	@echo "Flamegraph SVGs:  profile-api1/profile.svg, profile-api2/profile.svg"
 
-# Increments the patch version, tags, pushes to git, builds the linux/amd64
-# release image, publishes it to Docker Hub, and updates the submission branch
-# (docker-compose.yml, nginx.conf, info.json) with the new image tag.
+# Tags, builds, and publishes a linux/amd64 release image, then updates the
+# submission branch. Pass VERSION explicitly to control the tag:
+#   make release VERSION=v0.7.0
+# When VERSION is not set, the patch of the latest tag is incremented.
 release:
 	$(eval LAST_TAG := $(shell git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1))
-	$(eval VERSION := $(if $(LAST_TAG),$(shell echo $(LAST_TAG) | awk -F. '{print $$1"."$$2"."$$3+1}'),v0.1.0))
+	$(eval VERSION := $(or $(VERSION),$(if $(LAST_TAG),$(shell echo $(LAST_TAG) | awk -F. '{print $$1"."$$2"."$$3+1}'),v0.1.0)))
 	@echo "Releasing $(VERSION)"
 	git tag $(VERSION)
 	git push origin $(VERSION)
