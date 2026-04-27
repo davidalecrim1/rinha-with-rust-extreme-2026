@@ -1,6 +1,6 @@
 DOCKER_IMAGE := davidalecrim1/rinha-rust-extreme-2026
 
-.PHONY: lint run test release load-test profile
+.PHONY: lint run test release load-test profile fetch-test-data
 
 lint:
 	cargo fmt --check
@@ -13,6 +13,9 @@ test:
 
 run:
 	docker compose -f docker-compose.local.yml up --build -d
+
+fetch-test-data:
+	cp ../rinha-de-backend-2026/test/test-data.json scripts/test-data.json
 
 load-test: run
 	@echo "Waiting for stack to be ready..."

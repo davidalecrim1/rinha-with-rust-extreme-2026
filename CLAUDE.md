@@ -92,9 +92,13 @@ Same rules as Go submission:
 
 Copy from `rinha-de-backend-2026/resources/` into `resources/`:
 
-- `references.json.gz` — 100K labeled vectors (fraud/legit), ~1.6MB gzipped
+- `references.json.gz` — 100K labeled vectors (fraud/legit), ~16MB gzipped
 - `mcc_risk.json` — MCC code → risk score mapping
 - `normalization.json` — constants for the 14-dimension normalization formulas
+
+## Load test dataset
+
+`scripts/test-data.json` is gitignored (22 MB). Run `make fetch-test-data` after a fresh clone to copy it from the `rinha-de-backend-2026` submodule.
 
 ## Submission structure
 
