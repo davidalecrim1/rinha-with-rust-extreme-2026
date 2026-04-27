@@ -1,0 +1,57 @@
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - api-sockets:/var/run
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.05"
+          memory: "15MB"
+
+  api1:
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.6.0
+    platform: linux/amd64
+    environment:
+      - UNIX_SOCKET=/var/run/api1.sock
+    volumes:
+      - api-sockets:/var/run
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /var/run/api1.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.475"
+          memory: "167MB"
+
+  api2:
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.6.0
+    platform: linux/amd64
+    environment:
+      - UNIX_SOCKET=/var/run/api2.sock
+    volumes:
+      - api-sockets:/var/run
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /var/run/api2.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.475"
+          memory: "167MB"
+
+volumes:
+  api-sockets:
