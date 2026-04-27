@@ -1,4 +1,4 @@
-DOCKER_IMAGE := davidalecrim1/rinha-rust-2026
+DOCKER_IMAGE := davidalecrim1/rinha-rust-extreme-2026
 
 .PHONY: lint run test release load-test profile
 
@@ -8,6 +8,8 @@ lint:
 
 test:
 	cargo test
+	rustup target add x86_64-apple-darwin
+	cargo test --target x86_64-apple-darwin
 
 run:
 	docker compose -f docker-compose.local.yml up --build -d

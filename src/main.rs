@@ -1,5 +1,7 @@
 mod handler;
 mod index;
+mod packed_ref;
+mod simd;
 mod types;
 mod vectorizer;
 
@@ -17,11 +19,11 @@ use std::os::unix::fs::PermissionsExt;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() {
-    let gz = include_bytes!("../resources/references.json.gz");
     let mcc_raw = include_bytes!("../resources/mcc_risk.json");
     let norm_raw = include_bytes!("../resources/normalization.json");
 
-    let index = Arc::new(FraudIndex::build(gz));
+    // References are pre-packed at compile time by build.rs — no runtime I/O.
+    let index = Arc::new(FraudIndex::build());
     let mcc_risk = Arc::new(
         serde_json::from_slice::<HashMap<String, f32>>(mcc_raw)
             .expect("mcc_risk.json embedded in binary is invalid"),
