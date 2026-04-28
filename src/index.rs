@@ -15,7 +15,7 @@ const BIT_DIST_SQ: u64 = 8192 * 8192;
 const K: usize = 1024;
 
 #[cfg(feature = "ivf")]
-const NPROBE: usize = 50;
+const DEFAULT_NPROBE: usize = 50;
 
 pub struct FraudIndex {
     rows: Vec<[u8; 16]>,
@@ -23,6 +23,8 @@ pub struct FraudIndex {
     centroids: Vec<[f32; 14]>,
     #[cfg(feature = "ivf")]
     offsets: Vec<u32>,
+    #[cfg(feature = "ivf")]
+    nprobe: usize,
 }
 
 impl FraudIndex {
@@ -46,12 +48,20 @@ impl FraudIndex {
         #[cfg(feature = "ivf")]
         let (centroids, offsets) = Self::load_ivf_metadata();
 
+        #[cfg(feature = "ivf")]
+        let nprobe = std::env::var("NPROBE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_NPROBE);
+
         FraudIndex {
             rows,
             #[cfg(feature = "ivf")]
             centroids,
             #[cfg(feature = "ivf")]
             offsets,
+            #[cfg(feature = "ivf")]
+            nprobe,
         }
     }
 
@@ -143,7 +153,7 @@ impl FraudIndex {
     /// IVF search: find NPROBE nearest centroids, scan only those clusters.
     #[cfg(feature = "ivf")]
     fn search_ivf(&self, q: &[f32; 14]) -> f32 {
-        self.search_ivf_n(q, NPROBE)
+        self.search_ivf_n(q, self.nprobe)
     }
 
     /// IVF search with configurable nprobe (for benchmarking).
@@ -295,6 +305,8 @@ mod tests {
             centroids: Vec::new(),
             #[cfg(feature = "ivf")]
             offsets: Vec::new(),
+            #[cfg(feature = "ivf")]
+            nprobe: DEFAULT_NPROBE,
         }
     }
 
