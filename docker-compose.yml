@@ -22,7 +22,7 @@ services:
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
-      - NPROBE=50
+      - NPROBE=20
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -41,7 +41,7 @@ services:
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
-      - NPROBE=50
+      - NPROBE=20
     volumes:
       - api-sockets:/var/run
     healthcheck:
