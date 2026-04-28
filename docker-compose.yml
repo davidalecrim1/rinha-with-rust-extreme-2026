@@ -18,7 +18,7 @@ services:
           memory: "15MB"
 
   api1:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.6.1
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.6.2
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
@@ -36,7 +36,7 @@ services:
           memory: "167MB"
 
   api2:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.6.1
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.6.2
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
