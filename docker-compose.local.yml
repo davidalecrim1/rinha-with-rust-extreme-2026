@@ -23,6 +23,7 @@ services:
       dockerfile: Dockerfile.local
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
+      - NPROBE=50
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -42,6 +43,7 @@ services:
       dockerfile: Dockerfile.local
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
+      - NPROBE=50
     volumes:
       - api-sockets:/var/run
     healthcheck:
