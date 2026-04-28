@@ -15,7 +15,7 @@ const BIT_DIST_SQ: u64 = 8192 * 8192;
 const K: usize = 1024;
 
 #[cfg(feature = "ivf")]
-const NPROBE: usize = 100;
+const NPROBE: usize = 50;
 
 pub struct FraudIndex {
     rows: Vec<[u8; 16]>,
