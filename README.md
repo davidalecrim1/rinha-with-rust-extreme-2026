@@ -4,7 +4,7 @@ Rust submission for [rinha-de-backend-2026](https://github.com/zanfranceschi/rin
 
 ## What it does
 
-Receives a card transaction payload, vectorizes it into 14 f32 dimensions, finds the 5 nearest neighbors in a 100K labeled reference dataset using Euclidean distance, and returns:
+Receives a card transaction payload, vectorizes it into 14 f32 dimensions, finds the 5 nearest neighbors in a 3M labeled reference dataset using Euclidean distance, and returns:
 
 ```json
 { "approved": true, "fraud_score": 0.2 }
@@ -24,13 +24,14 @@ Total resource budget: 1.0 CPU / 350MB.
 
 ## Search strategy
 
-Brute-force KNN over a flat `Vec<f32>` buffer with LLVM auto-vectorization via `RUSTFLAGS=-C target-feature=+avx2,+fma`.
+IVF (Inverted File Index) with K=1024 centroids and nprobe=50, built on top of the same quantized row format and SIMD scan kernel used for brute-force.
 
-- 100K × 14 f32 ≈ 1.4M multiply-adds per query
-- AVX2 processes 8 floats/cycle → ~50–70µs per query on competition hardware
-- No approximation error, exact recall — no ANN library needed
+- 3M reference rows; IVF scans ~146K rows per query (~5% of the dataset)
+- Centroid selection: distance to all 1024 centroids, partial sort to pick top nprobe
+- Row scan: same 16-byte packed format + AVX2 SIMD distance kernel as brute-force
+- nprobe tunable via `NPROBE` env var; brute-force available as fallback (no `--features ivf`)
 
-A fixed array of 5 slots tracks the nearest neighbors in a single O(N) pass — on each candidate, a linear scan of the 5 slots evicts the farthest.
+A fixed array of 5 slots tracks the nearest neighbors in a single O(N) pass per cluster — on each candidate, a linear scan of the 5 slots evicts the farthest.
 
 ## Key decisions
 

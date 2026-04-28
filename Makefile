@@ -1,6 +1,6 @@
 DOCKER_IMAGE := davidalecrim1/rinha-rust-extreme-2026
 
-.PHONY: lint run test release load-test profile fetch-test-data
+.PHONY: lint run test release load-test official-load-test profile fetch-test-data
 
 lint:
 	cargo fmt --check
@@ -24,6 +24,13 @@ load-test: run
 	$(eval CURRENT_TAG := $(shell git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1))
 	@mkdir -p scripts/results
 	k6 run --env VERSION=$(CURRENT_TAG) scripts/load-test.js
+
+official-load-test:
+	docker compose -f docker-compose.local.yml -f docker-compose.local.uncapped.yml up --build -d
+	@echo "Waiting for stack to be ready..."
+	@until curl -sf http://localhost:9999/ready >/dev/null 2>&1; do sleep 1; done
+	@echo "Stack ready. Running official load test..."
+	cd ../rinha-de-backend-2026 && k6 run test/test.js
 
 profile:
 	@mkdir -p profile-api1 profile-api2

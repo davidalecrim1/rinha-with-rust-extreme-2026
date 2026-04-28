@@ -13,14 +13,14 @@ See `docs/rust-vs-go.md` for the full trade-off analysis. Build and validate cor
 Build a fraud detection API that:
 1. Receives a card transaction payload
 2. Vectorizes it into 14 f32 dimensions (normalization rules in `rinha-de-backend-2026/docs/en/DETECTION_RULES.md`)
-3. Finds the 5 nearest neighbors in a 1M-vector reference dataset using Euclidean distance
+3. Finds the 5 nearest neighbors in a 3M-vector reference dataset using Euclidean distance
 4. Returns `approved = fraud_score < 0.6` where `fraud_score = frauds_among_5 / 5`
 
 Full spec: `rinha-de-backend-2026/docs/en/`
 
 ## API contract
 
-- `GET /ready` — return 503 until HNSW index is built, then 200
+- `GET /ready` — return 200 (index is built at compile time, always ready at startup)
 - `POST /fraud-score` — receive transaction, return `{ "approved": bool, "fraud_score": float }`
 - Internal port: 8080 (nginx on 9999 forwards here)
 
@@ -37,7 +37,7 @@ nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
 | Decision | Choice | Reason |
 |---|---|---|
 | Vector type | f32 | Halves memory vs f64, cache-friendly, SIMD-aligned |
-| Vector search | Brute-force KNN + SIMD auto-vectorization | 100K × 14 f32 = ~1.4M ops; AVX2 brings this to ~50-70µs, well under 1ms p99 — no ANN approximation error |
+| Vector search | IVF (K=1024 centroids, nprobe=50) + SIMD row scan | 3M reference rows; IVF scans ~146K rows per query (~5%); AVX2 on the inner scan loop |
 | Resource files | Embedded in image via `COPY` | Self-contained, no volume mount dependencies |
 | Docker | Multi-stage → `FROM scratch` | Tiny final image, statically linked binary |
 | nginx | TBD — template to be provided | `worker_processes 1`, `keepalive 100`, `access_log off` as baseline |
@@ -47,7 +47,7 @@ nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
 | Decision | Choice | Reason |
 |---|---|---|
 | HTTP framework | `axum` | tokio-native, clean serde integration, tower overhead negligible at this scale |
-| KNN search | Brute-force over `Vec<f32>` flat buffer, AVX2 via `RUSTFLAGS=-C target-feature=+avx2` | Compiler auto-vectorizes inner loop; no external crate, no C deps, deterministic recall |
+| KNN search | IVF (K=1024 centroids, nprobe=50 default) over 16-byte quantized rows, AVX2 via `-C target-cpu=haswell` | ~20× fewer rows scanned vs brute-force; SIMD inner loop; nprobe tunable via env var |
 | Top-5 selection | Fixed array of 5 slots, linear eviction scan, O(N) | Avoids full sort; single pass over distances |
 | Async runtime | `tokio`, `worker_threads = 1` | Matches 0.475 CPU quota; eliminates thread contention, same reasoning as Go's `GOMAXPROCS=1` |
 | JSON | `serde_json` | Payload is ~200 bytes — simd-json gains (~1-2µs) don't justify axum extractor incompatibility |
@@ -57,10 +57,12 @@ nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
 
 Business logic must not leak into handlers. Each module has a single responsibility:
 
-- **`main.rs`**: wires modules, builds the HNSW index at startup, sets the readiness flag
+- **`main.rs`**: wires modules, loads embedded resources, sets the readiness flag
 - **`handler.rs`**: deserialize → call `vectorizer::vectorize()` → call `index::search()` → serialize. No scoring logic.
 - **`vectorizer.rs`**: transaction payload → `[f32; 14]`. Pure data transformation.
-- **`index.rs`**: owns the flat `Vec<f32>` reference buffer and label list. Exposes only `fn search(vector: [f32; 14]) -> f32` returning `fraud_score`. The `approved` decision (`score < 0.6`) lives here. Swap the search strategy by touching only this file.
+- **`index.rs`**: owns the packed `Vec<[u8; 16]>` reference buffer and IVF centroid/offset tables. Exposes only `fn search(vector: &[f32; 14]) -> f32` returning `fraud_score`. Swap the search strategy (brute-force vs IVF, nprobe) by touching only this file.
+- **`packed_ref.rs`**: 16-byte row encoding — 6 continuous dims as i16, 5 discrete dims as dictionary indices, 3 binary dims as bits, 1 label byte. Pre-computed partial distances (`PartialDists`) eliminate per-row arithmetic for low-cardinality dims.
+- **`simd.rs`**: AVX2 distance kernel for the 6 continuous dims.
 
 ## Project structure
 
@@ -92,7 +94,7 @@ Same rules as Go submission:
 
 Copy from `rinha-de-backend-2026/resources/` into `resources/`:
 
-- `references.json.gz` — 1M labeled vectors (fraud/legit), ~16MB gzipped
+- `references.json.gz` — 3M labeled vectors (fraud/legit), ~50MB gzipped
 - `mcc_risk.json` — MCC code → risk score mapping
 - `normalization.json` — constants for the 14-dimension normalization formulas
 

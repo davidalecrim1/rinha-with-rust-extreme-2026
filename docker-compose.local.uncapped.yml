@@ -1,0 +1,19 @@
+services:
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: "512MB"
+  api1:
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: "512MB"
+  api2:
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: "512MB"
