@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+ivf = []
 profiling = ["dep:pprof"]
 
 [dependencies]
@@ -16,8 +17,18 @@ pprof      = { version = "0.14", features = ["flamegraph", "protobuf-codec"], op
 
 [build-dependencies]
 flate2     = "1"
+rand       = "0.9"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Build scripts (build.rs) run unoptimized by default. K-means on 3M
+# vectors is ~1000x slower without optimization. These overrides ensure
+# build.rs runs at opt-level 3 in both dev and release builds.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
 
 [profile.release]
 opt-level     = 3

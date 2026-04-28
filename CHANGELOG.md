@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.1
+- IVF (Inverted File Index) vector search: k-means clustering at build time, scan only nearest 100 clusters at query time
+- ~10x fewer rows scanned per query (293K vs 3M), targeting sub-3ms p99 on competition hardware
+- Feature-flagged (`--features ivf`): brute-force remains the default fallback
+
+## v0.7.0
+- Updated to 3M reference dataset
+- Quantize references to i16 and scan with SSE2 SIMD — halves memory bandwidth vs f32
+- Replace TCP with Unix domain sockets between nginx and api instances
+
 ## v0.1.2
 - Add k6 load test script, replace shell-based example-payloads with Python
 - Include VUs and duration in load test result filenames

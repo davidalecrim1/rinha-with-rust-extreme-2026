@@ -1,9 +1,14 @@
 // Runs at `cargo build` time. Decompresses resources/references.json.gz,
-// parses the 100K labeled vectors, quantizes every value to i16 (scale × 8192),
-// and packs each row into exactly 16 bytes. The resulting binary blob is written
-// to $OUT_DIR/packed_refs.bin and a Rust source file with the dictionary
-// constants to $OUT_DIR/dicts.rs. At runtime, index.rs loads the blob via
-// include_bytes! — zero I/O, zero JSON parsing, zero decompression.
+// parses the labeled vectors, quantizes every value to i16 (scale x 8192),
+// and packs each row into exactly 16 bytes.
+//
+// When the `ivf` feature is enabled, also runs k-means (K=1024) to cluster
+// the vectors. Rows are sorted by cluster assignment so that each cluster
+// occupies a contiguous slice. Three additional files are emitted:
+//   - centroids.bin   (K x 14 x f32 = 56 KB)
+//   - cluster_offsets.bin ((K+1) x u32 = ~4 KB)
+//
+// At runtime, index.rs loads the blob via include_bytes!.
 
 use flate2::read::GzDecoder;
 use serde::Deserialize;
@@ -140,6 +145,110 @@ fn write_dict(out: &mut String, name: &str, values: &[i16]) {
     .unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// K-means clustering (only used when `ivf` feature is enabled)
+// ---------------------------------------------------------------------------
+
+const K: usize = 1024;
+const KMEANS_MAX_ITERS: usize = 20;
+
+fn l2_f32(a: &[f32; 14], b: &[f32; 14]) -> f32 {
+    let mut sum = 0.0f32;
+    for i in 0..14 {
+        let d = a[i] - b[i];
+        sum += d * d;
+    }
+    sum
+}
+
+/// Run Lloyd's k-means on `vectors`, returning (centroids, assignments).
+/// Initialization: random sampling of K vectors as initial centroids.
+/// Convergence: <0.1% assignments changed, or max iterations reached.
+fn kmeans(vectors: &[[f32; 14]]) -> (Vec<[f32; 14]>, Vec<u32>) {
+    use rand::seq::SliceRandom;
+
+    let n = vectors.len();
+    let mut rng = rand::rng();
+
+    // Random initialization: pick K distinct vectors as initial centroids
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.shuffle(&mut rng);
+    let mut centroids: Vec<[f32; 14]> = indices[..K]
+        .iter()
+        .map(|&i| vectors[i])
+        .collect();
+
+    let mut assignments = vec![0u32; n];
+
+    for iter in 0..KMEANS_MAX_ITERS {
+        // --- Assignment step: each vector -> nearest centroid ---
+        let mut changed = 0usize;
+        for i in 0..n {
+            let mut best_d = f32::MAX;
+            let mut best_c = 0u32;
+            for (c, centroid) in centroids.iter().enumerate() {
+                let d = l2_f32(&vectors[i], centroid);
+                if d < best_d {
+                    best_d = d;
+                    best_c = c as u32;
+                }
+            }
+            if assignments[i] != best_c {
+                changed += 1;
+                assignments[i] = best_c;
+            }
+        }
+
+        // --- Update step: recompute centroids as cluster means ---
+        // f64 accumulators to avoid precision loss over large clusters
+        let mut sums = vec![[0.0f64; 14]; K];
+        let mut counts = vec![0u64; K];
+        for i in 0..n {
+            let c = assignments[i] as usize;
+            counts[c] += 1;
+            for d in 0..14 {
+                sums[c][d] += vectors[i][d] as f64;
+            }
+        }
+        for c in 0..K {
+            if counts[c] > 0 {
+                for d in 0..14 {
+                    centroids[c][d] = (sums[c][d] / counts[c] as f64) as f32;
+                }
+            }
+            // Empty cluster: leave centroid unchanged (rare with K=1024, N=3M)
+        }
+
+        let pct = changed as f64 / n as f64 * 100.0;
+        eprintln!(
+            "cargo:warning=k-means iter {}: {} changed ({:.2}%)",
+            iter + 1,
+            changed,
+            pct
+        );
+        if pct < 0.1 {
+            eprintln!("cargo:warning=k-means converged at iteration {}", iter + 1);
+            break;
+        }
+    }
+
+    // Report cluster size stats
+    let mut sizes = vec![0u32; K];
+    for &a in &assignments {
+        sizes[a as usize] += 1;
+    }
+    let min_sz = *sizes.iter().min().unwrap();
+    let max_sz = *sizes.iter().max().unwrap();
+    let avg_sz = n as f64 / K as f64;
+    let empty = sizes.iter().filter(|&&s| s == 0).count();
+    eprintln!(
+        "cargo:warning=k-means cluster sizes: min={}, max={}, avg={:.0}, empty={}",
+        min_sz, max_sz, avg_sz, empty
+    );
+
+    (centroids, assignments)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=resources/references.json.gz");
 
@@ -170,18 +279,86 @@ fn main() {
     let entries: Vec<RefEntry> =
         serde_json::from_str(&json).expect("failed to parse references JSON");
 
-    let mut blob: Vec<u8> = Vec::with_capacity(entries.len() * 16);
-    for e in &entries {
-        let row = pack_row(&e.vector, &d1, &d3, &d4, &d8, &d12, e.label == "fraud");
-        blob.extend_from_slice(&row);
+    let ivf_enabled = std::env::var("CARGO_FEATURE_IVF").is_ok();
+
+    if ivf_enabled {
+        eprintln!(
+            "cargo:warning=IVF enabled: running k-means (K={}) on {} vectors...",
+            K,
+            entries.len()
+        );
+
+        // Extract f32 vectors for clustering
+        let vectors: Vec<[f32; 14]> = entries.iter().map(|e| e.vector).collect();
+        let (centroids, assignments) = kmeans(&vectors);
+
+        // Sort entries by cluster assignment for contiguous cluster layout
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_by_key(|&i| assignments[i]);
+
+        // Pack rows in cluster-sorted order
+        let mut blob: Vec<u8> = Vec::with_capacity(entries.len() * 16);
+        for &i in &order {
+            let e = &entries[i];
+            let row = pack_row(&e.vector, &d1, &d3, &d4, &d8, &d12, e.label == "fraud");
+            blob.extend_from_slice(&row);
+        }
+
+        // Compute cluster offsets from the sorted assignments
+        let mut offsets: Vec<u32> = Vec::with_capacity(K + 1);
+        let mut pos = 0u32;
+        for c in 0..K as u32 {
+            offsets.push(pos);
+            // Count how many vectors in this cluster
+            while (pos as usize) < entries.len() && assignments[order[pos as usize]] == c {
+                pos += 1;
+            }
+        }
+        offsets.push(entries.len() as u32);
+        assert_eq!(offsets.len(), K + 1);
+
+        // Write centroids: K x 14 x f32
+        let mut cent_blob: Vec<u8> = Vec::with_capacity(K * 14 * 4);
+        for c in &centroids {
+            for &v in c {
+                cent_blob.extend_from_slice(&v.to_ne_bytes());
+            }
+        }
+        std::fs::write(out_dir.join("centroids.bin"), &cent_blob)
+            .expect("failed to write centroids.bin");
+
+        // Write cluster offsets: (K+1) x u32
+        let mut off_blob: Vec<u8> = Vec::with_capacity((K + 1) * 4);
+        for &o in &offsets {
+            off_blob.extend_from_slice(&o.to_ne_bytes());
+        }
+        std::fs::write(out_dir.join("cluster_offsets.bin"), &off_blob)
+            .expect("failed to write cluster_offsets.bin");
+
+        std::fs::write(out_dir.join("packed_refs.bin"), &blob)
+            .expect("failed to write packed_refs.bin");
+
+        eprintln!(
+            "cargo:warning=build.rs: packed {} references (IVF, {} clusters) into {} bytes",
+            entries.len(),
+            K,
+            blob.len()
+        );
+    } else {
+        // Non-IVF: pack rows in original order (existing behavior)
+        let mut blob: Vec<u8> = Vec::with_capacity(entries.len() * 16);
+        for e in &entries {
+            let row = pack_row(&e.vector, &d1, &d3, &d4, &d8, &d12, e.label == "fraud");
+            blob.extend_from_slice(&row);
+        }
+
+        std::fs::write(out_dir.join("packed_refs.bin"), &blob)
+            .expect("failed to write packed_refs.bin");
+
+        eprintln!(
+            "cargo:warning=build.rs: packed {} references into {} bytes",
+            entries.len(),
+            blob.len()
+        );
     }
-
-    std::fs::write(out_dir.join("packed_refs.bin"), &blob)
-        .expect("failed to write packed_refs.bin");
-
-    eprintln!(
-        "cargo:warning=build.rs: packed {} references into {} bytes",
-        entries.len(),
-        blob.len()
-    );
 }
