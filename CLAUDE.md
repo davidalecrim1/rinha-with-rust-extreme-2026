@@ -13,7 +13,7 @@ See `docs/rust-vs-go.md` for the full trade-off analysis. Build and validate cor
 Build a fraud detection API that:
 1. Receives a card transaction payload
 2. Vectorizes it into 14 f32 dimensions (normalization rules in `rinha-de-backend-2026/docs/en/DETECTION_RULES.md`)
-3. Finds the 5 nearest neighbors in a 100K-vector reference dataset using Euclidean distance
+3. Finds the 5 nearest neighbors in a 1M-vector reference dataset using Euclidean distance
 4. Returns `approved = fraud_score < 0.6` where `fraud_score = frauds_among_5 / 5`
 
 Full spec: `rinha-de-backend-2026/docs/en/`
@@ -92,7 +92,7 @@ Same rules as Go submission:
 
 Copy from `rinha-de-backend-2026/resources/` into `resources/`:
 
-- `references.json.gz` — 100K labeled vectors (fraud/legit), ~16MB gzipped
+- `references.json.gz` — 1M labeled vectors (fraud/legit), ~16MB gzipped
 - `mcc_risk.json` — MCC code → risk score mapping
 - `normalization.json` — constants for the 14-dimension normalization formulas
 
