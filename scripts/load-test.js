@@ -1,6 +1,12 @@
 import http from 'k6/http';
 import { check } from 'k6';
+import { Rate } from 'k6/metrics';
 import { SharedArray } from 'k6/data';
+
+// Only counts HTTP errors from the app (non-200 responses).
+// Connection-level failures (EOF, timeout) are excluded — those are
+// infrastructure noise, not app bugs.
+const appErrors = new Rate('app_errors');
 
 const testData = new SharedArray('payloads', function () {
     return JSON.parse(open('./test-data.json')).entries;
@@ -37,6 +43,10 @@ export default function () {
         { headers: { 'Content-Type': 'application/json' } },
     );
     check(res, { 'status 200': (r) => r.status === 200 });
+    // res.status === 0 means a connection error (EOF, reset) — not an app error.
+    if (res.status !== 0) {
+        appErrors.add(res.status !== 200);
+    }
 }
 
 export function handleSummary(data) {
@@ -47,7 +57,7 @@ export function handleSummary(data) {
     const filename = `scripts/results/${ts}_${version}_${MAX_VUS}vus_${TOTAL_SECS}s.json`;
 
     const dur = data.metrics.http_req_duration.values;
-    const failed = data.metrics.http_req_failed.values;
+    const appErr = data.metrics.app_errors ? data.metrics.app_errors.values : { rate: 0 };
 
     return {
         [filename]: JSON.stringify({
@@ -55,7 +65,7 @@ export function handleSummary(data) {
             timestamp: now.toISOString(),
             p99_ms: +dur['p(99)'].toFixed(2),
             p95_ms: +dur['p(95)'].toFixed(2),
-            error_rate: +failed.rate.toFixed(6),
+            error_rate: +appErr.rate.toFixed(6),
             rps: +data.metrics.http_reqs.values.rate.toFixed(2),
         }, null, 2),
     };
