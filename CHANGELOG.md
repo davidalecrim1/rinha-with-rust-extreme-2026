@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.0
+- Rework IVF references into 8-wide AVX2 SoA blocks with `K=4096`
+- Add two-stage probing (`FAST_NPROBE=16`, `FULL_NPROBE=24`) for ambiguous scores
+- Official local load test: p99 4.43ms, 0% failure rate, final score 5172.84
+
 ## v0.7.1
 - IVF (Inverted File Index) vector search: k-means clustering at build time, scan only nearest 100 clusters at query time
 - ~10x fewer rows scanned per query (293K vs 3M), targeting sub-3ms p99 on competition hardware

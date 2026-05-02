@@ -1,432 +1,508 @@
-use crate::packed_ref::{query_cont_bytes, unpack_bits, PartialDists};
-use crate::simd;
-
-// 16-byte row layout (matches build.rs output):
-//   bytes  0–11 : [i16; 6] continuous dims (0, 2, 5, 6, 7, 13), native-endian
-//   bytes 12–14 : [u8; 3]  packed low-cardinality indices + binary flags
-//   byte  15    : u8        fraud label (0 = legit, 1 = fraud)
-const ROW: usize = 16;
-
-// When two binary dims differ (one is 0, the other is 8192 quantized), the
-// squared distance is (8192 - 0)^2 = 67_108_864.
-const BIT_DIST_SQ: u64 = 8192 * 8192;
+const D: usize = 14;
+const LANES: usize = 8;
+const BLOCK_I16S: usize = D * LANES;
+const SCALE: f32 = 0.0001;
 
 #[cfg(feature = "ivf")]
-const K: usize = 1024;
-
+const K: usize = 4096;
 #[cfg(feature = "ivf")]
-const DEFAULT_NPROBE: usize = 50;
+const FAST_NPROBE: usize = 16;
+#[cfg(feature = "ivf")]
+const FULL_NPROBE: usize = 24;
 
 pub struct FraudIndex {
-    rows: Vec<[u8; 16]>,
+    blocks: &'static [u8],
+    labels: &'static [u8],
     #[cfg(feature = "ivf")]
-    centroids: Vec<[f32; 14]>,
+    centroids: Vec<f32>,
     #[cfg(feature = "ivf")]
     offsets: Vec<u32>,
     #[cfg(feature = "ivf")]
-    nprobe: usize,
+    fast_nprobe: usize,
+    #[cfg(feature = "ivf")]
+    full_nprobe: usize,
 }
 
 impl FraudIndex {
-    /// Load the pre-packed binary blob produced by build.rs.
-    /// No decompression, no JSON parsing — single memcpy from the binary's
-    /// read-only data segment.
     pub fn build() -> Self {
-        let raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/packed_refs.bin"));
+        let blocks_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blocks.bin"));
+        let labels_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/labels.bin"));
 
-        assert!(
-            raw.len() % ROW == 0,
-            "packed_refs.bin size {} is not a multiple of {ROW}",
-            raw.len()
+        assert_eq!(
+            blocks_raw.len() % 2,
+            0,
+            "blocks.bin must contain i16 values"
+        );
+        assert_eq!(
+            (blocks_raw.len() / 2) % BLOCK_I16S,
+            0,
+            "blocks.bin must contain complete {BLOCK_I16S}-i16 blocks"
+        );
+        assert_eq!(
+            labels_raw.len(),
+            blocks_raw.len() / 2 / D,
+            "labels.bin must contain {LANES} labels per block"
         );
 
-        let mut rows: Vec<[u8; 16]> = Vec::with_capacity(raw.len() / ROW);
-        for chunk in raw.chunks_exact(ROW) {
-            rows.push(chunk.try_into().unwrap());
-        }
+        #[cfg(feature = "ivf")]
+        let centroids = Self::load_centroids();
+        #[cfg(feature = "ivf")]
+        let offsets = Self::load_offsets(K + 1);
 
         #[cfg(feature = "ivf")]
-        let (centroids, offsets) = Self::load_ivf_metadata();
-
+        let fast_nprobe = env_usize("FAST_NPROBE", FAST_NPROBE).min(K);
         #[cfg(feature = "ivf")]
-        let nprobe = std::env::var("NPROBE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_NPROBE);
+        let full_nprobe = env_usize("FULL_NPROBE", FULL_NPROBE)
+            .min(K)
+            .max(fast_nprobe);
 
-        FraudIndex {
-            rows,
+        Self {
+            blocks: blocks_raw,
+            labels: labels_raw,
             #[cfg(feature = "ivf")]
             centroids,
             #[cfg(feature = "ivf")]
             offsets,
             #[cfg(feature = "ivf")]
-            nprobe,
+            fast_nprobe,
+            #[cfg(feature = "ivf")]
+            full_nprobe,
         }
     }
 
     #[cfg(feature = "ivf")]
-    fn load_ivf_metadata() -> (Vec<[f32; 14]>, Vec<u32>) {
-        let cent_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/centroids.bin"));
-        let off_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_offsets.bin"));
-
-        assert_eq!(
-            cent_raw.len(),
-            K * 14 * 4,
-            "centroids.bin size mismatch: expected {}, got {}",
-            K * 14 * 4,
-            cent_raw.len()
-        );
-        assert_eq!(
-            off_raw.len(),
-            (K + 1) * 4,
-            "cluster_offsets.bin size mismatch: expected {}, got {}",
-            (K + 1) * 4,
-            off_raw.len()
-        );
-
-        let mut centroids = Vec::with_capacity(K);
-        for i in 0..K {
-            let mut c = [0.0f32; 14];
-            for d in 0..14 {
-                let offset = (i * 14 + d) * 4;
-                c[d] = f32::from_ne_bytes(cent_raw[offset..offset + 4].try_into().unwrap());
-            }
-            centroids.push(c);
+    fn load_centroids() -> Vec<f32> {
+        let raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/centroids.bin"));
+        assert_eq!(raw.len(), K * D * 4, "centroids.bin size mismatch");
+        let mut centroids = Vec::with_capacity(K * D);
+        for chunk in raw.chunks_exact(4) {
+            centroids.push(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
-
-        let mut offsets = Vec::with_capacity(K + 1);
-        for i in 0..=K {
-            let offset = i * 4;
-            offsets.push(u32::from_ne_bytes(off_raw[offset..offset + 4].try_into().unwrap()));
-        }
-
-        (centroids, offsets)
+        centroids
     }
 
-    /// Returns the fraud score for query vector `q` using k-NN with k=5.
-    pub fn search(&self, q: &[f32; 14]) -> f32 {
+    #[cfg(feature = "ivf")]
+    fn load_offsets(expected_len: usize) -> Vec<u32> {
+        let raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/block_offsets.bin"));
+        assert_eq!(
+            raw.len(),
+            expected_len * 4,
+            "block_offsets.bin size mismatch"
+        );
+        let mut offsets = Vec::with_capacity(expected_len);
+        for chunk in raw.chunks_exact(4) {
+            offsets.push(u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        offsets
+    }
+
+    pub fn search(&self, q: &[f32; D]) -> f32 {
         #[cfg(feature = "ivf")]
         {
-            return self.search_ivf(q);
+            self.search_ivf(q)
         }
 
         #[cfg(not(feature = "ivf"))]
         {
-            self.search_brute_force(q)
+            self.search_all(q)
         }
     }
 
-    /// Brute-force scan over all rows.
     #[cfg(any(not(feature = "ivf"), test))]
-    fn search_brute_force(&self, q: &[f32; 14]) -> f32 {
-        let q_cont = query_cont_bytes(q);
-        let pd = PartialDists::compute(q);
-
-        let mut neighbors: [(u64, bool); 5] = [(u64::MAX, false); 5];
-        let (mut worst_slot, mut worst_dist) = (0usize, u64::MAX);
-
-        #[cfg(target_arch = "x86_64")]
-        let (q_simd, zero_lanes_mask) = unsafe {
-            use std::arch::x86_64::*;
-            let q_v = simd::load_m128(&q_cont);
-            let mask = _mm_set_epi32(0, 0, -1i32, -1i32);
-            (q_v, mask)
-        };
-
-        scan_rows(
-            &self.rows,
-            &q_cont,
-            &pd,
-            #[cfg(target_arch = "x86_64")]
-            q_simd,
-            #[cfg(target_arch = "x86_64")]
-            zero_lanes_mask,
-            &mut neighbors,
-            &mut worst_slot,
-            &mut worst_dist,
+    fn search_all(&self, q: &[f32; D]) -> f32 {
+        let mut top = [(f32::INFINITY, 0u8); 5];
+        let mut worst_idx = 0usize;
+        scan_blocks(
+            q,
+            &self.blocks,
+            &self.labels,
+            0,
+            self.blocks.len() / 2 / BLOCK_I16S,
+            &mut top,
+            &mut worst_idx,
         );
-
-        neighbors.iter().filter(|(_, f)| *f).count() as f32 / 5.0
+        fraud_score(&top)
     }
 
-    /// IVF search: find NPROBE nearest centroids, scan only those clusters.
     #[cfg(feature = "ivf")]
-    fn search_ivf(&self, q: &[f32; 14]) -> f32 {
-        self.search_ivf_n(q, self.nprobe)
-    }
+    fn search_ivf(&self, q: &[f32; D]) -> f32 {
+        let mut centroid_dists = vec![0.0f32; K];
+        compute_centroid_dists(q, &self.centroids, &mut centroid_dists);
 
-    /// IVF search with configurable nprobe (for benchmarking).
-    #[cfg(feature = "ivf")]
-    fn search_ivf_n(&self, q: &[f32; 14], nprobe: usize) -> f32 {
-        let nprobe = nprobe.min(K);
-
-        // 1. Compute distance from query to all K centroids
-        let mut cdists: Vec<(f32, u16)> = Vec::with_capacity(K);
-        for (i, c) in self.centroids.iter().enumerate() {
-            cdists.push((l2_f32(q, c), i as u16));
+        let fast = top_n_centroids::<FAST_NPROBE>(&centroid_dists);
+        let fast_score = self.scan_probes(q, &fast[..self.fast_nprobe.min(FAST_NPROBE)]);
+        if fast_score != 0.4 && fast_score != 0.6 {
+            return fast_score;
         }
 
-        // 2. Partial sort to find nprobe nearest centroids
-        cdists.select_nth_unstable_by(nprobe - 1, |a, b| {
-            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let full = top_n_centroids::<FULL_NPROBE>(&centroid_dists);
+        self.scan_probes(q, &full[..self.full_nprobe.min(FULL_NPROBE)])
+    }
 
-        // 3. Prepare query state
-        let q_cont = query_cont_bytes(q);
-        let pd = PartialDists::compute(q);
+    #[cfg(feature = "ivf")]
+    fn scan_probes(&self, q: &[f32; D], probes: &[usize]) -> f32 {
+        let mut top = [(f32::INFINITY, 0u8); 5];
+        let mut worst_idx = 0usize;
 
-        #[cfg(target_arch = "x86_64")]
-        let (q_simd, zero_lanes_mask) = unsafe {
-            use std::arch::x86_64::*;
-            let q_v = simd::load_m128(&q_cont);
-            let mask = _mm_set_epi32(0, 0, -1i32, -1i32);
-            (q_v, mask)
-        };
-
-        let mut neighbors: [(u64, bool); 5] = [(u64::MAX, false); 5];
-        let (mut worst_slot, mut worst_dist) = (0usize, u64::MAX);
-
-        // 4. Scan rows in the nprobe nearest clusters
-        for &(_, cluster_id) in &cdists[..nprobe] {
-            let start = self.offsets[cluster_id as usize] as usize;
-            let end = self.offsets[cluster_id as usize + 1] as usize;
-
-            scan_rows(
-                &self.rows[start..end],
-                &q_cont,
-                &pd,
-                #[cfg(target_arch = "x86_64")]
-                q_simd,
-                #[cfg(target_arch = "x86_64")]
-                zero_lanes_mask,
-                &mut neighbors,
-                &mut worst_slot,
-                &mut worst_dist,
+        for &cluster_id in probes {
+            let start = self.offsets[cluster_id] as usize;
+            let end = self.offsets[cluster_id + 1] as usize;
+            scan_blocks(
+                q,
+                &self.blocks,
+                &self.labels,
+                start,
+                end,
+                &mut top,
+                &mut worst_idx,
             );
         }
 
-        neighbors.iter().filter(|(_, f)| *f).count() as f32 / 5.0
+        fraud_score(&top)
     }
 }
 
-/// Shared inner scan loop used by both brute-force and IVF paths.
-/// Scans `rows` computing distance = SIMD_cont + table_lookup_discrete + binary,
-/// updating the top-5 neighbor tracker.
-#[inline(always)]
-fn scan_rows(
-    rows: &[[u8; 16]],
-    #[cfg(not(target_arch = "x86_64"))] q_cont: &[u8; 16],
-    #[cfg(target_arch = "x86_64")] _q_cont: &[u8; 16],
-    pd: &PartialDists,
-    #[cfg(target_arch = "x86_64")] q_simd: std::arch::x86_64::__m128i,
-    #[cfg(target_arch = "x86_64")] zero_lanes_mask: std::arch::x86_64::__m128i,
-    neighbors: &mut [(u64, bool); 5],
-    worst_slot: &mut usize,
-    worst_dist: &mut u64,
-) {
-    for row in rows {
-        #[cfg(target_arch = "x86_64")]
-        let cont = unsafe {
-            use std::arch::x86_64::*;
-            let r_masked = _mm_and_si128(simd::load_m128(row), zero_lanes_mask);
-            simd::dist_cont(q_simd, r_masked) as u64
-        };
+#[cfg(feature = "ivf")]
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
 
-        #[cfg(not(target_arch = "x86_64"))]
-        let cont = {
-            let r_buf: &[u8; 12] = row[0..12].try_into().unwrap();
-            simd::dist_cont_scalar(q_cont, r_buf) as u64
-        };
+#[cfg(feature = "ivf")]
+fn compute_centroid_dists(q: &[f32; D], centroids: &[f32], out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        compute_centroid_dists_avx2(q, centroids, out);
+    }
 
-        let bits = [row[12], row[13], row[14]];
-        let (i1, i3, i4, i8, i12, b9, b10, b11) = unpack_bits(&bits);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        compute_centroid_dists_scalar(q, centroids, out);
+    }
+}
 
-        let discrete: u64 = pd.d1[i1] as u64
-            + pd.d3[i3] as u64
-            + pd.d4[i4] as u64
-            + pd.d8[i8] as u64
-            + pd.d12[i12] as u64;
+#[cfg(all(feature = "ivf", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn compute_centroid_dists_avx2(q: &[f32; D], centroids: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
 
-        let binary: u64 = bit_sq(b9, pd.q9)
-            + bit_sq(b10, pd.q10)
-            + bit_sq(b11, pd.q11);
+    let cp = centroids.as_ptr();
+    let dp = out.as_mut_ptr();
 
-        let dist = cont + discrete + binary;
+    let q0 = _mm256_set1_ps(q[0]);
+    let mut ci = 0usize;
+    while ci + 8 <= K {
+        let c = _mm256_loadu_ps(cp.add(ci));
+        let d = _mm256_sub_ps(c, q0);
+        _mm256_storeu_ps(dp.add(ci), _mm256_mul_ps(d, d));
+        ci += 8;
+    }
 
-        if dist < *worst_dist {
-            let is_fraud = row[15] != 0;
-            neighbors[*worst_slot] = (dist, is_fraud);
-            (*worst_slot, *worst_dist) = find_worst(neighbors);
+    for dim in 1..D {
+        let base = dim * K;
+        let qd = _mm256_set1_ps(q[dim]);
+        let mut ci = 0usize;
+        while ci + 8 <= K {
+            let c = _mm256_loadu_ps(cp.add(base + ci));
+            let d = _mm256_sub_ps(c, qd);
+            let acc = _mm256_loadu_ps(dp.add(ci));
+            _mm256_storeu_ps(dp.add(ci), _mm256_fmadd_ps(d, d, acc));
+            ci += 8;
         }
     }
 }
 
-/// Returns BIT_DIST_SQ when binary dims differ, 0 when equal.
-#[inline(always)]
-fn bit_sq(r: u8, q: u8) -> u64 {
-    if r == q { 0 } else { BIT_DIST_SQ }
-}
-
-/// Returns the index and distance of the farthest neighbor in the top-5.
-fn find_worst(neighbors: &[(u64, bool); 5]) -> (usize, u64) {
-    neighbors
-        .iter()
-        .enumerate()
-        .fold((0, 0), |(wi, wd), (i, &(d, _))| {
-            if d > wd { (i, d) } else { (wi, wd) }
-        })
+#[cfg(all(feature = "ivf", not(target_arch = "x86_64")))]
+fn compute_centroid_dists_scalar(q: &[f32; D], centroids: &[f32], out: &mut [f32]) {
+    for ci in 0..out.len() {
+        let mut sum = 0.0f32;
+        for dim in 0..D {
+            let d = centroids[dim * out.len() + ci] - q[dim];
+            sum += d * d;
+        }
+        out[ci] = sum;
+    }
 }
 
 #[cfg(feature = "ivf")]
-#[inline(always)]
-fn l2_f32(a: &[f32; 14], b: &[f32; 14]) -> f32 {
-    let mut sum = 0.0f32;
-    for i in 0..14 {
-        let d = a[i] - b[i];
-        sum += d * d;
+fn top_n_centroids<const N: usize>(dists: &[f32]) -> [usize; N] {
+    let mut top_dists = [f32::INFINITY; N];
+    let mut top_idx = [0usize; N];
+
+    for (idx, &dist) in dists.iter().enumerate() {
+        if dist < top_dists[N - 1] {
+            let pos = top_dists.partition_point(|&x| x < dist);
+            top_dists[pos..N].rotate_right(1);
+            top_dists[pos] = dist;
+            top_idx[pos..N].rotate_right(1);
+            top_idx[pos] = idx;
+        }
     }
-    sum
+
+    top_idx
+}
+
+fn scan_blocks(
+    q: &[f32; D],
+    blocks: &[u8],
+    labels: &[u8],
+    start_block: usize,
+    end_block: usize,
+    top: &mut [(f32, u8); 5],
+    worst_idx: &mut usize,
+) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        scan_blocks_avx2(q, blocks, labels, start_block, end_block, top, worst_idx);
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        scan_blocks_scalar(q, blocks, labels, start_block, end_block, top, worst_idx);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn scan_blocks_avx2(
+    q: &[f32; D],
+    blocks: &[u8],
+    labels: &[u8],
+    start_block: usize,
+    end_block: usize,
+    top: &mut [(f32, u8); 5],
+    worst_idx: &mut usize,
+) {
+    use std::arch::x86_64::*;
+
+    let scale = _mm256_set1_ps(SCALE);
+    let q_vecs = [
+        _mm256_set1_ps(q[0]),
+        _mm256_set1_ps(q[1]),
+        _mm256_set1_ps(q[2]),
+        _mm256_set1_ps(q[3]),
+        _mm256_set1_ps(q[4]),
+        _mm256_set1_ps(q[5]),
+        _mm256_set1_ps(q[6]),
+        _mm256_set1_ps(q[7]),
+        _mm256_set1_ps(q[8]),
+        _mm256_set1_ps(q[9]),
+        _mm256_set1_ps(q[10]),
+        _mm256_set1_ps(q[11]),
+        _mm256_set1_ps(q[12]),
+        _mm256_set1_ps(q[13]),
+    ];
+
+    let blocks_ptr = blocks.as_ptr();
+    let labels_ptr = labels.as_ptr();
+
+    for block_i in start_block..end_block {
+        let prefetch = block_i + 8;
+        if prefetch < end_block {
+            _mm_prefetch(
+                blocks_ptr.add(prefetch * BLOCK_I16S * 2) as *const i8,
+                _MM_HINT_T0,
+            );
+            _mm_prefetch(
+                blocks_ptr.add(prefetch * BLOCK_I16S * 2 + 112) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let base = block_i * BLOCK_I16S;
+        let threshold = _mm256_set1_ps(top[*worst_idx].0);
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 0);
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 2);
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 4);
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 6);
+
+        let partial = _mm256_add_ps(acc0, acc1);
+        if _mm256_movemask_ps(_mm256_cmp_ps(partial, threshold, _CMP_LT_OQ)) == 0 {
+            continue;
+        }
+
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 8);
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 10);
+        dim_pair(&mut acc0, &mut acc1, blocks_ptr, base, &q_vecs, scale, 12);
+
+        let acc = _mm256_add_ps(acc0, acc1);
+        let mut mask = _mm256_movemask_ps(_mm256_cmp_ps(acc, threshold, _CMP_LT_OQ)) as u32;
+        if mask == 0 {
+            continue;
+        }
+
+        let mut dists = [0.0f32; LANES];
+        _mm256_storeu_ps(dists.as_mut_ptr(), acc);
+        let label_base = block_i * LANES;
+        while mask != 0 {
+            let lane = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            update_top(
+                top,
+                worst_idx,
+                dists[lane],
+                *labels_ptr.add(label_base + lane),
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dim_pair(
+    acc0: &mut std::arch::x86_64::__m256,
+    acc1: &mut std::arch::x86_64::__m256,
+    blocks_ptr: *const u8,
+    base: usize,
+    q_vecs: &[std::arch::x86_64::__m256; D],
+    scale: std::arch::x86_64::__m256,
+    dim: usize,
+) {
+    use std::arch::x86_64::*;
+
+    let r0 = _mm_loadu_si128(blocks_ptr.add((base + dim * LANES) * 2) as *const __m128i);
+    let r1 = _mm_loadu_si128(blocks_ptr.add((base + (dim + 1) * LANES) * 2) as *const __m128i);
+    let v0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(r0)), scale);
+    let v1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(r1)), scale);
+    let d0 = _mm256_sub_ps(v0, q_vecs[dim]);
+    let d1 = _mm256_sub_ps(v1, q_vecs[dim + 1]);
+    *acc0 = _mm256_fmadd_ps(d0, d0, *acc0);
+    *acc1 = _mm256_fmadd_ps(d1, d1, *acc1);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn scan_blocks_scalar(
+    q: &[f32; D],
+    blocks: &[u8],
+    labels: &[u8],
+    start_block: usize,
+    end_block: usize,
+    top: &mut [(f32, u8); 5],
+    worst_idx: &mut usize,
+) {
+    for block_i in start_block..end_block {
+        let base = block_i * BLOCK_I16S;
+        for lane in 0..LANES {
+            let mut dist = 0.0f32;
+            for dim in 0..D {
+                let offset = (base + dim * LANES + lane) * 2;
+                let rv = i16::from_ne_bytes([blocks[offset], blocks[offset + 1]]) as f32 * SCALE;
+                let d = rv - q[dim];
+                dist += d * d;
+            }
+            update_top(top, worst_idx, dist, labels[block_i * LANES + lane]);
+        }
+    }
+}
+
+#[inline(always)]
+fn update_top(top: &mut [(f32, u8); 5], worst_idx: &mut usize, dist: f32, label: u8) {
+    if dist >= top[*worst_idx].0 {
+        return;
+    }
+
+    top[*worst_idx] = (dist, label);
+    let mut wi = 0usize;
+    let mut wd = top[0].0;
+    for (i, &(d, _)) in top.iter().enumerate().skip(1) {
+        if d > wd {
+            wd = d;
+            wi = i;
+        }
+    }
+    *worst_idx = wi;
+}
+
+fn fraud_score(top: &[(f32, u8); 5]) -> f32 {
+    top.iter().filter(|(_, label)| *label != 0).count() as f32 / 5.0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packed_ref::pack_row_for_test;
 
-    fn make_index(entries: &[([f32; 14], bool)]) -> FraudIndex {
-        let rows = entries
-            .iter()
-            .map(|(v, is_fraud)| pack_row_for_test(v, *is_fraud))
-            .collect();
+    fn make_index(entries: &[([f32; D], bool)]) -> FraudIndex {
+        let mut blocks_i16 = Vec::new();
+        let mut labels = Vec::new();
+
+        for chunk in entries.chunks(LANES) {
+            for lane in 0..LANES {
+                labels.push(chunk.get(lane).map(|(_, f)| *f as u8).unwrap_or(0));
+            }
+            for dim in 0..D {
+                for lane in 0..LANES {
+                    blocks_i16.push(
+                        chunk
+                            .get(lane)
+                            .map(|(v, _)| (v[dim] * 10_000.0).round() as i16)
+                            .unwrap_or(i16::MAX),
+                    );
+                }
+            }
+        }
+
+        let mut blocks = Vec::with_capacity(blocks_i16.len() * 2);
+        for value in blocks_i16 {
+            blocks.extend_from_slice(&value.to_ne_bytes());
+        }
+
         FraudIndex {
-            rows,
+            blocks: Box::leak(blocks.into_boxed_slice()),
+            labels: Box::leak(labels.into_boxed_slice()),
             #[cfg(feature = "ivf")]
             centroids: Vec::new(),
             #[cfg(feature = "ivf")]
             offsets: Vec::new(),
             #[cfg(feature = "ivf")]
-            nprobe: DEFAULT_NPROBE,
+            fast_nprobe: FAST_NPROBE,
+            #[cfg(feature = "ivf")]
+            full_nprobe: FULL_NPROBE,
         }
     }
 
-    const ZERO: [f32; 14] = [0.0; 14];
+    const ZERO: [f32; D] = [0.0; D];
 
     #[test]
     fn search_all_fraud() {
         let idx = make_index(&[
-            (ZERO, true), (ZERO, true), (ZERO, true), (ZERO, true), (ZERO, true),
+            (ZERO, true),
+            (ZERO, true),
+            (ZERO, true),
+            (ZERO, true),
+            (ZERO, true),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 1.0);
-    }
-
-    #[test]
-    fn search_all_legit() {
-        let idx = make_index(&[
-            (ZERO, false), (ZERO, false), (ZERO, false), (ZERO, false), (ZERO, false),
-        ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 0.0);
+        assert_eq!(idx.search_all(&ZERO), 1.0);
     }
 
     #[test]
     fn search_mixed_3_fraud_2_legit() {
         let idx = make_index(&[
-            (ZERO, true), (ZERO, true), (ZERO, true), (ZERO, false), (ZERO, false),
+            (ZERO, true),
+            (ZERO, true),
+            (ZERO, true),
+            (ZERO, false),
+            (ZERO, false),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 0.6);
+        assert_eq!(idx.search_all(&ZERO), 0.6);
     }
 
     #[test]
-    fn search_nearest_neighbors_win() {
-        // 5 fraud vectors close to origin; 1 legit far away — top-5 must all be fraud.
-        let close = [0.01f32; 14];
-        let far   = [0.9f32; 14];
+    fn padded_lanes_do_not_enter_top5() {
+        let close = [0.01f32; D];
+        let far = [0.9f32; D];
         let idx = make_index(&[
-            (close, true), (close, true), (close, true), (close, true), (close, true),
+            (close, true),
+            (close, true),
+            (close, true),
+            (close, true),
+            (close, true),
             (far, false),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 1.0);
-    }
-
-    /// IVF recall benchmark: compare IVF at various nprobe values against
-    /// brute-force ground truth on the full compiled-in dataset.
-    /// Run with: cargo test --features ivf --release -- --nocapture recall_benchmark
-    #[cfg(feature = "ivf")]
-    #[test]
-    fn recall_benchmark() {
-        let idx = FraudIndex::build();
-
-        // Generate query vectors spanning the input space.
-        // Mix of "corner" vectors and pseudo-random ones for coverage.
-        let mut queries: Vec<[f32; 14]> = Vec::new();
-
-        // Systematic grid: vary each dimension while others stay at 0.5
-        for dim in 0..14 {
-            for &val in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
-                let mut q = [0.5f32; 14];
-                q[dim] = val;
-                queries.push(q);
-            }
-        }
-
-        // Corners and extremes
-        queries.push([0.0; 14]);
-        queries.push([1.0; 14]);
-        queries.push([0.5; 14]);
-
-        // Pseudo-random queries using a simple LCG (no rand dependency in test)
-        let mut seed: u64 = 42;
-        for _ in 0..500 {
-            let mut q = [0.0f32; 14];
-            for d in 0..14 {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                q[d] = ((seed >> 33) as f32) / (u32::MAX as f32 / 2.0);
-                q[d] = q[d].clamp(0.0, 1.0);
-            }
-            queries.push(q);
-        }
-
-        let n = queries.len();
-
-        // Compute brute-force ground truth ONCE for all queries
-        eprintln!("\nComputing brute-force ground truth for {} queries...", n);
-        let bf_scores: Vec<f32> = queries.iter().map(|q| idx.search_brute_force(q)).collect();
-        eprintln!("Ground truth computed.");
-
-        let nprobe_values = [5, 10, 20, 50, 100, 200, 500];
-
-        eprintln!("\n=== IVF Recall Benchmark ({} queries, K={}) ===", n, K);
-        eprintln!(
-            "{:>8} {:>12} {:>12} {:>12}",
-            "nprobe", "score_match", "decision_eq", "rows_scanned"
-        );
-
-        for &nprobe in &nprobe_values {
-            let mut score_matches = 0usize;
-            let mut decision_matches = 0usize;
-
-            for (i, q) in queries.iter().enumerate() {
-                let ivf_score = idx.search_ivf_n(q, nprobe);
-
-                if (bf_scores[i] - ivf_score).abs() < 1e-6 {
-                    score_matches += 1;
-                }
-                if (bf_scores[i] < 0.6) == (ivf_score < 0.6) {
-                    decision_matches += 1;
-                }
-            }
-
-            let avg_cluster_size = idx.rows.len() / K;
-            let rows_scanned = nprobe * avg_cluster_size;
-
-            eprintln!(
-                "{:>8} {:>11.2}% {:>11.2}% {:>12}",
-                nprobe,
-                score_matches as f64 / n as f64 * 100.0,
-                decision_matches as f64 / n as f64 * 100.0,
-                rows_scanned,
-            );
-        }
-        eprintln!("=== End Benchmark ===\n");
+        assert_eq!(idx.search_all(&ZERO), 1.0);
     }
 }

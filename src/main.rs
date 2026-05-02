@@ -1,7 +1,5 @@
 mod handler;
 mod index;
-mod packed_ref;
-mod simd;
 mod types;
 mod vectorizer;
 
