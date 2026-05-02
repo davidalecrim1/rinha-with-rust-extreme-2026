@@ -18,12 +18,11 @@ services:
           memory: "15MB"
 
   api1:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.0
+    image: davidalecrim1/rinha-rust-extreme-2026:0.7.4
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
-      - FAST_NPROBE=16
-      - FULL_NPROBE=24
+      - NPROBE=20
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -38,12 +37,11 @@ services:
           memory: "167MB"
 
   api2:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.0
+    image: davidalecrim1/rinha-rust-extreme-2026:0.7.4
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
-      - FAST_NPROBE=16
-      - FULL_NPROBE=24
+      - NPROBE=20
     volumes:
       - api-sockets:/var/run
     healthcheck:
