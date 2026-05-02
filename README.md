@@ -1,4 +1,4 @@
-# rinha-with-rust-2026
+# rinha-with-rust-extreme-2026
 
 Rust submission for [rinha-de-backend-2026](https://github.com/zanfranceschi/rinha-de-backend-2026) — a fraud detection API competition scored on p99 latency and detection accuracy.
 
@@ -15,23 +15,28 @@ Receives a card transaction payload, vectorizes it into 14 f32 dimensions, finds
 ## Architecture
 
 ```
-nginx (0.05 CPU / 15MB)  — listens on :9999, round-robin
-  ├── api1 (0.475 CPU / 167MB)  — listens on :8080
-  └── api2 (0.475 CPU / 167MB)  — listens on :8080
+nginx (0.05 CPU / 15MB)  — listens on :9999, round-robin over UDS
+  ├── api1 (0.475 CPU / 167MB)  — listens on /var/run/api1.sock
+  └── api2 (0.475 CPU / 167MB)  — listens on /var/run/api2.sock
 ```
 
 Total resource budget: 1.0 CPU / 350MB.
 
 ## Search strategy
 
-IVF (Inverted File Index) with K=1024 centroids and nprobe=50, built on top of the same quantized row format and SIMD scan kernel used for brute-force.
+IVF (Inverted File Index) with `K=4096` centroids and an AVX2-friendly 8-wide structure-of-arrays block layout.
 
-- 3M reference rows; IVF scans ~146K rows per query (~5% of the dataset)
-- Centroid selection: distance to all 1024 centroids, partial sort to pick top nprobe
-- Row scan: same 16-byte packed format + AVX2 SIMD distance kernel as brute-force
-- nprobe tunable via `NPROBE` env var; brute-force available as fallback (no `--features ivf`)
+- 3M reference rows; fast path scans the nearest 16 clusters, fallback scans 24 clusters for boundary scores
+- Centroid selection: distance to all 4096 centroids, then fixed top-N selection
+- Block scan: each block stores 8 vectors as `14 dims x 8 i16` so AVX2 evaluates 8 candidates at once
+- Probe counts are tunable with `FAST_NPROBE` and `FULL_NPROBE`
 
 A fixed array of 5 slots tracks the nearest neighbors in a single O(N) pass per cluster — on each candidate, a linear scan of the 5 slots evicts the farthest.
+
+Latest local results:
+
+- `scripts/results/2026-05-02T18-28-19_v0.8.0_200vus_60s.json`: p99 89.82ms, p95 66.43ms, 0% error, 1239.86 RPS
+- Official local test (`../rinha-de-backend-2026/test/results.json`): p99 4.43ms, 0% failure, 1 false negative, final score 5172.84
 
 ## Key decisions
 
@@ -39,7 +44,7 @@ A fixed array of 5 slots tracks the nearest neighbors in a single O(N) pass per 
 |---|---|---|
 | HTTP framework | `axum` | tokio-native, minimal overhead |
 | Runtime | `tokio`, `worker_threads = 1` | Matches 0.475 CPU quota; eliminates thread contention |
-| Vector type | `f32` | Halves memory vs f64, cache-friendly, SIMD-aligned |
+| Vector storage | Quantized `i16` SoA blocks | Cuts bandwidth and lets AVX2 scan 8 candidates per block |
 | Resource files | `include_bytes!` | Embedded at compile time — self-contained binary, no volume mounts |
 | Docker | Multi-stage → `FROM scratch` | Minimal final image, statically linked musl binary |
 | JSON | `serde_json` | Payload is ~200 bytes — simd-json gains don't justify extractor incompatibility |
@@ -51,7 +56,7 @@ src/
   main.rs        startup, resource loading, axum wiring
   types.rs       all request/response structs and NormConsts
   vectorizer.rs  14-dim normalization (pure function)
-  index.rs       brute-force KNN, exposes search(vector) -> f32
+  index.rs       IVF + AVX2 block KNN, exposes search(vector) -> f32
   handler.rs     axum handlers for /ready and /fraud-score
 ```
 

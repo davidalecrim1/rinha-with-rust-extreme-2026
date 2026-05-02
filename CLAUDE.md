@@ -1,6 +1,6 @@
-# rinha-with-rust-2026
+# rinha-with-rust-extreme-2026
 
-Rust submission for rinha-de-backend-2026 — fraud detection via vector search.
+Rust submission for rinha-de-backend-2026 — fraud detection via IVF vector search.
 
 ## Why Rust
 
@@ -27,9 +27,9 @@ Full spec: `rinha-de-backend-2026/docs/en/`
 ## Architecture
 
 ```
-nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
-  ├── api1 (0.475 CPU / 167MB)  ← listens on :8080
-  └── api2 (0.475 CPU / 167MB)  ← listens on :8080
+nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin over UDS
+  ├── api1 (0.475 CPU / 167MB)  ← listens on /var/run/api1.sock
+  └── api2 (0.475 CPU / 167MB)  ← listens on /var/run/api2.sock
 ```
 
 ## Design decisions (shared with Go submission)
@@ -37,7 +37,7 @@ nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
 | Decision | Choice | Reason |
 |---|---|---|
 | Vector type | f32 | Halves memory vs f64, cache-friendly, SIMD-aligned |
-| Vector search | IVF (K=1024 centroids, nprobe=50) + SIMD row scan | 3M reference rows; IVF scans ~146K rows per query (~5%); AVX2 on the inner scan loop |
+| Vector search | IVF (K=4096) + AVX2 8-wide SoA block scan | 3M reference rows; fast path probes 16 clusters, fallback probes 24 for boundary scores |
 | Resource files | Embedded in image via `COPY` | Self-contained, no volume mount dependencies |
 | Docker | Multi-stage → `FROM scratch` | Tiny final image, statically linked binary |
 | nginx | TBD — template to be provided | `worker_processes 1`, `keepalive 100`, `access_log off` as baseline |
@@ -47,7 +47,7 @@ nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
 | Decision | Choice | Reason |
 |---|---|---|
 | HTTP framework | `axum` | tokio-native, clean serde integration, tower overhead negligible at this scale |
-| KNN search | IVF (K=1024 centroids, nprobe=50 default) over 16-byte quantized rows, AVX2 via `-C target-cpu=haswell` | ~20× fewer rows scanned vs brute-force; SIMD inner loop; nprobe tunable via env var |
+| KNN search | IVF (K=4096) over `14 x 8` quantized i16 blocks, AVX2 via `-C target-cpu=haswell` | Scans fewer clusters and evaluates 8 candidate vectors per AVX2 block |
 | Top-5 selection | Fixed array of 5 slots, linear eviction scan, O(N) | Avoids full sort; single pass over distances |
 | Async runtime | `tokio`, `worker_threads = 1` | Matches 0.475 CPU quota; eliminates thread contention, same reasoning as Go's `GOMAXPROCS=1` |
 | JSON | `serde_json` | Payload is ~200 bytes — simd-json gains (~1-2µs) don't justify axum extractor incompatibility |
@@ -60,19 +60,19 @@ Business logic must not leak into handlers. Each module has a single responsibil
 - **`main.rs`**: wires modules, loads embedded resources, sets the readiness flag
 - **`handler.rs`**: deserialize → call `vectorizer::vectorize()` → call `index::search()` → serialize. No scoring logic.
 - **`vectorizer.rs`**: transaction payload → `[f32; 14]`. Pure data transformation.
-- **`index.rs`**: owns the packed `Vec<[u8; 16]>` reference buffer and IVF centroid/offset tables. Exposes only `fn search(vector: &[f32; 14]) -> f32` returning `fraud_score`. Swap the search strategy (brute-force vs IVF, nprobe) by touching only this file.
-- **`packed_ref.rs`**: 16-byte row encoding — 6 continuous dims as i16, 5 discrete dims as dictionary indices, 3 binary dims as bits, 1 label byte. Pre-computed partial distances (`PartialDists`) eliminate per-row arithmetic for low-cardinality dims.
-- **`simd.rs`**: AVX2 distance kernel for the 6 continuous dims.
+- **`index.rs`**: owns embedded block bytes, labels, IVF centroids, and block offsets. Exposes only `fn search(vector: &[f32; 14]) -> f32` returning `fraud_score`.
+- **`build.rs`**: trains deterministic k-means++ IVF metadata and emits `blocks.bin`, `labels.bin`, `block_offsets.bin`, and `centroids.bin`.
+- **Removed packed-row hot path**: old 16-byte rows were replaced by `14 dims x 8 lanes` quantized i16 SoA blocks.
 
 ## Project structure
 
 ```
-rinha-with-rust-2026/
+rinha-with-rust-extreme-2026/
 ├── src/
 │   ├── main.rs          # startup, runtime config, readiness flag
 │   ├── handler.rs       # axum handlers for /ready and /fraud-score
 │   ├── vectorizer.rs    # 14-dim normalization
-│   └── index.rs         # instant-distance wrapper, exposes search(vector) -> f32
+│   └── index.rs         # IVF + AVX2 block scan, exposes search(vector) -> f32
 ├── resources/
 │   ├── references.json.gz
 │   ├── mcc_risk.json
@@ -101,6 +101,12 @@ Copy from `rinha-de-backend-2026/resources/` into `resources/`:
 ## Load test dataset
 
 `scripts/test-data.json` is gitignored (22 MB). Run `make fetch-test-data` after a fresh clone to copy it from the `rinha-de-backend-2026` submodule.
+
+## Current v0.8.0 results
+
+- `scripts/results/2026-05-02T18-28-19_v0.8.0_200vus_60s.json`: p99 89.82ms, p95 66.43ms, 0% error, 1239.86 RPS
+- Official local test output: `../rinha-de-backend-2026/test/results.json`
+- Official local score: p99 4.43ms, 0% failure, 1 false negative, final score 5172.84
 
 ## Submission structure
 
