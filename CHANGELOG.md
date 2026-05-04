@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.3
+- Add decision-aware IVF refinement: scan `IVF_PRIMARY_NPROBE=4`, skip repair for clear top-5 votes, and refine ambiguous votes with `IVF_REFINE_NPROBE=24`
+- Bound refinement by both clusters and rows with `IVF_REPAIR_MAX_EXTRA_CLUSTERS=96` and `IVF_REPAIR_MAX_EXTRA_ROWS=180000`; rebalance CPU to nginx `0.10` and each API `0.45`
+- Local official load test: final score 3069.62, p99 3.35ms, 0 HTTP errors, 366 false positives, 386 false negatives
+
 ## v0.8.2
 - Bound IVF bbox repair with `IVF_REPAIR_MAX_EXTRA_CLUSTERS=32` and lower `NPROBE` to `4` to avoid official-limit backpressure
 - Add explicit Haswell SIMD target features and strip symbols in the release Docker build

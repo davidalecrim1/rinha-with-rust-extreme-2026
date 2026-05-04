@@ -29,7 +29,8 @@ IVF (Inverted File Index) with K=1024 centroids and nprobe=50, built on top of t
 - 3M reference rows; IVF scans ~146K rows per query (~5% of the dataset)
 - Centroid selection: distance to all 1024 centroids, partial sort to pick top nprobe
 - Row scan: same 16-byte packed format + AVX2 SIMD distance kernel as brute-force
-- nprobe tunable via `NPROBE`; bbox repair tunable via `IVF_REPAIR` and `IVF_REPAIR_MAX_EXTRA_CLUSTERS`
+- Primary/refine probes tunable via `IVF_PRIMARY_NPROBE` and `IVF_REFINE_NPROBE`; bbox repair tunable via `IVF_REPAIR`, `IVF_REPAIR_MAX_EXTRA_CLUSTERS`, and `IVF_REPAIR_MAX_EXTRA_ROWS`
+- Equal-distance neighbors break ties by stable packed row order; carrying original source ids is deferred to preserve the 16-byte row format and memory budget
 
 A fixed array of 5 slots tracks the nearest neighbors in a single O(N) pass per cluster — on each candidate, a linear scan of the 5 slots evicts the farthest.
 
