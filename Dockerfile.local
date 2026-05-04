@@ -6,7 +6,7 @@ COPY src       ./src
 COPY resources ./resources
 ARG CARGO_PROFILE=release
 ARG CARGO_FEATURES=
-RUN cargo build --profile ${CARGO_PROFILE} --features ivf${CARGO_FEATURES:+,$CARGO_FEATURES}
+RUN cargo build --profile ${CARGO_PROFILE} ${CARGO_FEATURES:+--features ${CARGO_FEATURES}}
 
 FROM alpine:latest
 RUN apk add --no-cache wget

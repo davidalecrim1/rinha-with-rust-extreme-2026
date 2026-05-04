@@ -2,9 +2,9 @@
 // parses the labeled vectors, quantizes every value to i16 (scale x 8192),
 // and packs each row into exactly 16 bytes.
 //
-// When the `ivf` feature is enabled, also runs k-means (K=1024) to cluster
-// the vectors. Rows are sorted by cluster assignment so that each cluster
-// occupies a contiguous slice. IVF metadata files are emitted:
+// Also runs k-means (K=1024) to cluster the vectors. Rows are sorted by
+// cluster assignment so that each cluster occupies a contiguous slice. IVF
+// metadata files are emitted:
 //   - centroids.bin   (K x 14 x f32 = 56 KB)
 //   - cluster_offsets.bin ((K+1) x u32 = ~4 KB)
 //   - bbox_min.bin    (K x 14 x i16 = 28 KB)
@@ -86,15 +86,15 @@ fn find_dict_index(dict: &[i16], val: i16) -> u8 {
 //   bit  21     (1 bit)  : dim 9  binary (is_online)
 //   bit  22     (1 bit)  : dim 10 binary (card_present)
 //   bit  23     (1 bit)  : dim 11 binary (unknown_merchant)
-fn pack_bits(i1: u8, i3: u8, i4: u8, i8: u8, i12: u8, b9: u8, b10: u8, b11: u8) -> [u8; 3] {
-    let bits: u32 = (i1 as u32)
-        | ((i3 as u32) << 4)
-        | ((i4 as u32) << 9)
-        | ((i8 as u32) << 12)
-        | ((i12 as u32) << 17)
-        | ((b9 as u32) << 21)
-        | ((b10 as u32) << 22)
-        | ((b11 as u32) << 23);
+fn pack_bits(indices: [u8; 5], flags: [u8; 3]) -> [u8; 3] {
+    let bits: u32 = (indices[0] as u32)
+        | ((indices[1] as u32) << 4)
+        | ((indices[2] as u32) << 9)
+        | ((indices[3] as u32) << 12)
+        | ((indices[4] as u32) << 17)
+        | ((flags[0] as u32) << 21)
+        | ((flags[1] as u32) << 22)
+        | ((flags[2] as u32) << 23);
     [bits as u8, (bits >> 8) as u8, (bits >> 16) as u8]
 }
 
@@ -128,7 +128,7 @@ fn pack_row(
     let b10 = (v[10] > 0.5) as u8;
     let b11 = (v[11] > 0.5) as u8;
 
-    let bits = pack_bits(i1, i3, i4, i8, i12, b9, b10, b11);
+    let bits = pack_bits([i1, i3, i4, i8, i12], [b9, b10, b11]);
 
     let mut row = [0u8; 16];
     row[0..2].copy_from_slice(&c0.to_ne_bytes());
@@ -188,7 +188,7 @@ fn write_dict(out: &mut String, name: &str, values: &[i16]) {
 }
 
 // ---------------------------------------------------------------------------
-// K-means clustering (only used when `ivf` feature is enabled)
+// K-means clustering used by the default IVF index
 // ---------------------------------------------------------------------------
 
 const K: usize = 1024;
@@ -319,116 +319,89 @@ fn main() {
     let entries: Vec<RefEntry> =
         serde_json::from_str(&json).expect("failed to parse references JSON");
 
-    let ivf_enabled = std::env::var("CARGO_FEATURE_IVF").is_ok();
+    eprintln!(
+        "cargo:warning=running k-means (K={}) on {} vectors...",
+        K,
+        entries.len()
+    );
 
-    if ivf_enabled {
-        eprintln!(
-            "cargo:warning=IVF enabled: running k-means (K={}) on {} vectors...",
-            K,
-            entries.len()
-        );
+    let vectors: Vec<[f32; 14]> = entries.iter().map(|e| e.vector).collect();
+    let (centroids, assignments) = kmeans(&vectors);
 
-        // Extract f32 vectors for clustering
-        let vectors: Vec<[f32; 14]> = entries.iter().map(|e| e.vector).collect();
-        let (centroids, assignments) = kmeans(&vectors);
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| assignments[i]);
 
-        // Sort entries by cluster assignment for contiguous cluster layout
-        let mut order: Vec<usize> = (0..entries.len()).collect();
-        order.sort_by_key(|&i| assignments[i]);
-
-        // Pack rows in cluster-sorted order
-        let mut blob: Vec<u8> = Vec::with_capacity(entries.len() * 16);
-        for &i in &order {
-            let e = &entries[i];
-            let row = pack_row(&e.vector, &d1, &d3, &d4, &d8, &d12, e.label == "fraud");
-            blob.extend_from_slice(&row);
-        }
-
-        // Compute cluster offsets from the sorted assignments
-        let mut offsets: Vec<u32> = Vec::with_capacity(K + 1);
-        let mut pos = 0u32;
-        for c in 0..K as u32 {
-            offsets.push(pos);
-            // Count how many vectors in this cluster
-            while (pos as usize) < entries.len() && assignments[order[pos as usize]] == c {
-                pos += 1;
-            }
-        }
-        offsets.push(entries.len() as u32);
-        assert_eq!(offsets.len(), K + 1);
-
-        let mut bbox_min = vec![[i16::MAX; 14]; K];
-        let mut bbox_max = vec![[i16::MIN; 14]; K];
-        for &i in &order {
-            let cluster = assignments[i] as usize;
-            let qv = quantized_search_vector(&entries[i].vector, &d1, &d3, &d4, &d8, &d12);
-            for d in 0..14 {
-                bbox_min[cluster][d] = bbox_min[cluster][d].min(qv[d]);
-                bbox_max[cluster][d] = bbox_max[cluster][d].max(qv[d]);
-            }
-        }
-        for c in 0..K {
-            if offsets[c] == offsets[c + 1] {
-                bbox_min[c] = [0; 14];
-                bbox_max[c] = [0; 14];
-            }
-        }
-
-        // Write centroids: K x 14 x f32
-        let mut cent_blob: Vec<u8> = Vec::with_capacity(K * 14 * 4);
-        for c in &centroids {
-            for &v in c {
-                cent_blob.extend_from_slice(&v.to_ne_bytes());
-            }
-        }
-        std::fs::write(out_dir.join("centroids.bin"), &cent_blob)
-            .expect("failed to write centroids.bin");
-
-        // Write cluster offsets: (K+1) x u32
-        let mut off_blob: Vec<u8> = Vec::with_capacity((K + 1) * 4);
-        for &o in &offsets {
-            off_blob.extend_from_slice(&o.to_ne_bytes());
-        }
-        std::fs::write(out_dir.join("cluster_offsets.bin"), &off_blob)
-            .expect("failed to write cluster_offsets.bin");
-
-        let mut bbox_min_blob: Vec<u8> = Vec::with_capacity(K * 14 * 2);
-        let mut bbox_max_blob: Vec<u8> = Vec::with_capacity(K * 14 * 2);
-        for c in 0..K {
-            for d in 0..14 {
-                bbox_min_blob.extend_from_slice(&bbox_min[c][d].to_ne_bytes());
-                bbox_max_blob.extend_from_slice(&bbox_max[c][d].to_ne_bytes());
-            }
-        }
-        std::fs::write(out_dir.join("bbox_min.bin"), &bbox_min_blob)
-            .expect("failed to write bbox_min.bin");
-        std::fs::write(out_dir.join("bbox_max.bin"), &bbox_max_blob)
-            .expect("failed to write bbox_max.bin");
-
-        std::fs::write(out_dir.join("packed_refs.bin"), &blob)
-            .expect("failed to write packed_refs.bin");
-
-        eprintln!(
-            "cargo:warning=build.rs: packed {} references (IVF, {} clusters) into {} bytes",
-            entries.len(),
-            K,
-            blob.len()
-        );
-    } else {
-        // Non-IVF: pack rows in original order (existing behavior)
-        let mut blob: Vec<u8> = Vec::with_capacity(entries.len() * 16);
-        for e in &entries {
-            let row = pack_row(&e.vector, &d1, &d3, &d4, &d8, &d12, e.label == "fraud");
-            blob.extend_from_slice(&row);
-        }
-
-        std::fs::write(out_dir.join("packed_refs.bin"), &blob)
-            .expect("failed to write packed_refs.bin");
-
-        eprintln!(
-            "cargo:warning=build.rs: packed {} references into {} bytes",
-            entries.len(),
-            blob.len()
-        );
+    let mut blob: Vec<u8> = Vec::with_capacity(entries.len() * 16);
+    for &i in &order {
+        let e = &entries[i];
+        let row = pack_row(&e.vector, &d1, &d3, &d4, &d8, &d12, e.label == "fraud");
+        blob.extend_from_slice(&row);
     }
+
+    let mut offsets: Vec<u32> = Vec::with_capacity(K + 1);
+    let mut pos = 0u32;
+    for c in 0..K as u32 {
+        offsets.push(pos);
+        while (pos as usize) < entries.len() && assignments[order[pos as usize]] == c {
+            pos += 1;
+        }
+    }
+    offsets.push(entries.len() as u32);
+    assert_eq!(offsets.len(), K + 1);
+
+    let mut bbox_min = vec![[i16::MAX; 14]; K];
+    let mut bbox_max = vec![[i16::MIN; 14]; K];
+    for &i in &order {
+        let cluster = assignments[i] as usize;
+        let qv = quantized_search_vector(&entries[i].vector, &d1, &d3, &d4, &d8, &d12);
+        for d in 0..14 {
+            bbox_min[cluster][d] = bbox_min[cluster][d].min(qv[d]);
+            bbox_max[cluster][d] = bbox_max[cluster][d].max(qv[d]);
+        }
+    }
+    for c in 0..K {
+        if offsets[c] == offsets[c + 1] {
+            bbox_min[c] = [0; 14];
+            bbox_max[c] = [0; 14];
+        }
+    }
+
+    let mut cent_blob: Vec<u8> = Vec::with_capacity(K * 14 * 4);
+    for centroid in &centroids {
+        for &value in centroid {
+            cent_blob.extend_from_slice(&value.to_ne_bytes());
+        }
+    }
+    std::fs::write(out_dir.join("centroids.bin"), &cent_blob)
+        .expect("failed to write centroids.bin");
+
+    let mut off_blob: Vec<u8> = Vec::with_capacity((K + 1) * 4);
+    for &offset in &offsets {
+        off_blob.extend_from_slice(&offset.to_ne_bytes());
+    }
+    std::fs::write(out_dir.join("cluster_offsets.bin"), &off_blob)
+        .expect("failed to write cluster_offsets.bin");
+
+    let mut bbox_min_blob: Vec<u8> = Vec::with_capacity(K * 14 * 2);
+    let mut bbox_max_blob: Vec<u8> = Vec::with_capacity(K * 14 * 2);
+    for c in 0..K {
+        for d in 0..14 {
+            bbox_min_blob.extend_from_slice(&bbox_min[c][d].to_ne_bytes());
+            bbox_max_blob.extend_from_slice(&bbox_max[c][d].to_ne_bytes());
+        }
+    }
+    std::fs::write(out_dir.join("bbox_min.bin"), &bbox_min_blob)
+        .expect("failed to write bbox_min.bin");
+    std::fs::write(out_dir.join("bbox_max.bin"), &bbox_max_blob)
+        .expect("failed to write bbox_max.bin");
+
+    std::fs::write(out_dir.join("packed_refs.bin"), &blob)
+        .expect("failed to write packed_refs.bin");
+
+    eprintln!(
+        "cargo:warning=build.rs: packed {} references (IVF, {} clusters) into {} bytes",
+        entries.len(),
+        K,
+        blob.len()
+    );
 }

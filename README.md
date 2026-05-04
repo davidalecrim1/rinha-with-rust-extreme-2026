@@ -24,11 +24,11 @@ Total resource budget: 1.0 CPU / 350MB.
 
 ## Search strategy
 
-IVF (Inverted File Index) with K=1024 centroids and nprobe=50, built on top of the same quantized row format and SIMD scan kernel used for brute-force.
+IVF (Inverted File Index) with K=1024 centroids and bounded refinement, built on top of the same quantized row format and SIMD scan kernel used in the clustered scan.
 
 - 3M reference rows; IVF scans ~146K rows per query (~5% of the dataset)
 - Centroid selection: distance to all 1024 centroids, partial sort to pick top nprobe
-- Row scan: same 16-byte packed format + AVX2 SIMD distance kernel as brute-force
+- Row scan: 16-byte packed rows + AVX2 SIMD distance kernel
 - Primary/refine probes tunable via `IVF_PRIMARY_NPROBE` and `IVF_REFINE_NPROBE`; bbox repair tunable via `IVF_REPAIR`, `IVF_REPAIR_MAX_EXTRA_CLUSTERS`, and `IVF_REPAIR_MAX_EXTRA_ROWS`
 - Equal-distance neighbors break ties by stable packed row order; carrying original source ids is deferred to preserve the 16-byte row format and memory budget
 
@@ -52,7 +52,7 @@ src/
   main.rs        startup, resource loading, axum wiring
   types.rs       all request/response structs and NormConsts
   vectorizer.rs  14-dim normalization (pure function)
-  index.rs       brute-force KNN, exposes search(vector) -> f32
+  index.rs       IVF search, exposes search(vector) -> f32
   handler.rs     axum handlers for /ready and /fraud-score
 ```
 

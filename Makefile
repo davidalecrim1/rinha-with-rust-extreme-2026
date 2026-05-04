@@ -20,7 +20,8 @@ run:
 fetch-test-data:
 	cp ../rinha-de-backend-2026/test/test-data.json scripts/test-data.json
 
-load-test: run
+load-test:
+	docker compose -f docker-compose.local.yml up --build -d
 	@echo "Waiting for stack to be ready..."
 	@until curl -sf http://localhost:9999/ready >/dev/null 2>&1; do sleep 1; done
 	@echo "Stack ready. Running load test..."
@@ -29,7 +30,7 @@ load-test: run
 	k6 run --env VERSION=$(CURRENT_TAG) scripts/load-test.js
 
 official-load-test:
-	docker compose -f docker-compose.yml -f docker-compose.local.uncapped.yml up -d
+	docker compose -f docker-compose.local.yml up --build -d
 	@echo "Waiting for stack to be ready..."
 	@until curl -sf http://localhost:9999/ready >/dev/null 2>&1; do sleep 1; done
 	@echo "Stack ready. Running official load test..."
@@ -76,7 +77,7 @@ release:
 		git worktree add --orphan -b submission /tmp/rinha-submission; \
 	fi
 	@sed 's|$(DOCKER_IMAGE):latest|$(DOCKER_IMAGE):$(VERSION)|g' docker-compose.yml > /tmp/rinha-submission/docker-compose.yml
-	@cp nginx.conf info.json /tmp/rinha-submission/
+	@cp docker-compose.local.yml docker-compose.profile.yml nginx.conf info.json /tmp/rinha-submission/
 	@cd /tmp/rinha-submission && git add -A && git commit -m "release $(VERSION)" && git push -u origin submission
 	@git worktree remove /tmp/rinha-submission
 	@echo "Released $(VERSION) — submission branch updated"

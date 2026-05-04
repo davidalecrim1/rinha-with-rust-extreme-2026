@@ -54,8 +54,8 @@ fn clamp(x: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
     use crate::types::{Customer, LastTransaction, Merchant, Terminal, Transaction};
+    use chrono::DateTime;
 
     fn dt(s: &str) -> DateTime<chrono::FixedOffset> {
         DateTime::parse_from_rfc3339(s).unwrap()
@@ -112,8 +112,8 @@ mod tests {
 
         // [amount, installments, amount_vs_avg, hour, dow, minutes_since, km_last, km_home, tx_count, online, card, unknown_merchant, mcc_risk, merchant_avg]
         let expected: [f32; 14] = [
-            0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1.0, -1.0, 0.0292, 0.15, 0.0, 1.0, 0.0,
-            0.15, 0.006,
+            0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1.0, -1.0, 0.0292, 0.15, 0.0, 1.0, 0.0, 0.15,
+            0.006,
         ];
 
         for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
@@ -216,13 +216,15 @@ mod tests {
 
         let v = vectorize(&req, &norm(), &mcc_risk);
         let expected: [f32; 14] = [
-            0.038488, 0.25, 0.05, 0.869565, 0.333333,
-            0.225694, 0.018863, 0.013709, 0.15, 0.0,
-            1.0, 0.0, 0.20, 0.029895,
+            0.038488, 0.25, 0.05, 0.869565, 0.333333, 0.225694, 0.018863, 0.013709, 0.15, 0.0, 1.0,
+            0.0, 0.20, 0.029895,
         ];
 
         for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
-            assert!(approx_eq(got, exp), "dim {i}: got {got:.6} expected {exp:.6}");
+            assert!(
+                approx_eq(got, exp),
+                "dim {i}: got {got:.6} expected {exp:.6}"
+            );
         }
     }
 
@@ -267,13 +269,15 @@ mod tests {
 
         let v = vectorize(&req, &norm(), &mcc_risk);
         let expected: [f32; 14] = [
-            0.436882, 0.666667, 1.0, 0.086957, 0.166667,
-            0.004167, 0.660920, 0.881614, 0.9, 1.0,
+            0.436882, 0.666667, 1.0, 0.086957, 0.166667, 0.004167, 0.660920, 0.881614, 0.9, 1.0,
             0.0, 1.0, 0.80, 0.002555,
         ];
 
         for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
-            assert!(approx_eq(got, exp), "dim {i}: got {got:.6} expected {exp:.6}");
+            assert!(
+                approx_eq(got, exp),
+                "dim {i}: got {got:.6} expected {exp:.6}"
+            );
         }
     }
 
@@ -317,13 +321,15 @@ mod tests {
 
         let v = vectorize(&req, &norm(), &mcc_risk);
         let expected: [f32; 14] = [
-            0.126515, 0.5, 0.361533, 0.826087, 0.333333,
-            0.077083, 0.131622, 0.136507, 0.25, 1.0,
+            0.126515, 0.5, 0.361533, 0.826087, 0.333333, 0.077083, 0.131622, 0.136507, 0.25, 1.0,
             0.0, 1.0, 0.75, 0.010711,
         ];
 
         for (i, (&got, &exp)) in v.iter().zip(expected.iter()).enumerate() {
-            assert!(approx_eq(got, exp), "dim {i}: got {got:.6} expected {exp:.6}");
+            assert!(
+                approx_eq(got, exp),
+                "dim {i}: got {got:.6} expected {exp:.6}"
+            );
         }
     }
 

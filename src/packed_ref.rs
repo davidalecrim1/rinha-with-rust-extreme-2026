@@ -9,9 +9,7 @@ pub const SCALE: f32 = 8192.0;
 
 #[inline(always)]
 pub fn quantize(v: f32) -> i16 {
-    (v * SCALE)
-        .round()
-        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    (v * SCALE).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 // 24-bit layout packed into 3 bytes, LSB first:
@@ -27,14 +25,14 @@ pub fn quantize(v: f32) -> i16 {
 pub fn unpack_bits(packed: &[u8; 3]) -> (usize, usize, usize, usize, usize, u8, u8, u8) {
     let bits = (packed[0] as u32) | ((packed[1] as u32) << 8) | ((packed[2] as u32) << 16);
     (
-        (bits & 0xF) as usize,           // dim 1
-        ((bits >> 4) & 0x1F) as usize,   // dim 3
-        ((bits >> 9) & 0x7) as usize,    // dim 4
-        ((bits >> 12) & 0x1F) as usize,  // dim 8
-        ((bits >> 17) & 0xF) as usize,   // dim 12
-        ((bits >> 21) & 0x1) as u8,      // dim 9  binary
-        ((bits >> 22) & 0x1) as u8,      // dim 10 binary
-        ((bits >> 23) & 0x1) as u8,      // dim 11 binary
+        (bits & 0xF) as usize,          // dim 1
+        ((bits >> 4) & 0x1F) as usize,  // dim 3
+        ((bits >> 9) & 0x7) as usize,   // dim 4
+        ((bits >> 12) & 0x1F) as usize, // dim 8
+        ((bits >> 17) & 0xF) as usize,  // dim 12
+        ((bits >> 21) & 0x1) as u8,     // dim 9  binary
+        ((bits >> 22) & 0x1) as u8,     // dim 10 binary
+        ((bits >> 23) & 0x1) as u8,     // dim 11 binary
     )
 }
 
@@ -43,30 +41,30 @@ pub fn unpack_bits(packed: &[u8; 3]) -> (usize, usize, usize, usize, usize, u8, 
 /// ~208 bytes), stays in L1 cache for the entire 100K-row scan. During the scan
 /// each lookup is a single array index — no arithmetic.
 pub struct PartialDists {
-    pub d1:  [u32; 13],
-    pub d3:  [u32; 24],
-    pub d4:  [u32;  7],
-    pub d8:  [u32; 21],
+    pub d1: [u32; 13],
+    pub d3: [u32; 24],
+    pub d4: [u32; 7],
+    pub d8: [u32; 21],
     pub d12: [u32; 10],
     // Query binary dim values (0 or 1) stored alongside so the search loop
     // can compare them against reference bits without re-reading the query.
-    pub q9:  u8,
+    pub q9: u8,
     pub q10: u8,
     pub q11: u8,
 }
 
 impl PartialDists {
     pub fn compute(q: &[f32; 14]) -> Self {
-        let q1  = quantize(q[1])  as i32;
-        let q3  = quantize(q[3])  as i32;
-        let q4  = quantize(q[4])  as i32;
-        let q8  = quantize(q[8])  as i32;
+        let q1 = quantize(q[1]) as i32;
+        let q3 = quantize(q[3]) as i32;
+        let q4 = quantize(q[4]) as i32;
+        let q8 = quantize(q[8]) as i32;
         let q12 = quantize(q[12]) as i32;
 
-        let mut d1  = [0u32; 13];
-        let mut d3  = [0u32; 24];
-        let mut d4  = [0u32;  7];
-        let mut d8  = [0u32; 21];
+        let mut d1 = [0u32; 13];
+        let mut d3 = [0u32; 24];
+        let mut d4 = [0u32; 7];
+        let mut d8 = [0u32; 21];
         let mut d12 = [0u32; 10];
 
         for (i, &v) in DICT01.iter().enumerate() {
@@ -91,8 +89,12 @@ impl PartialDists {
         }
 
         Self {
-            d1, d3, d4, d8, d12,
-            q9:  (q[9]  > 0.5) as u8,
+            d1,
+            d3,
+            d4,
+            d8,
+            d12,
+            q9: (q[9] > 0.5) as u8,
             q10: (q[10] > 0.5) as u8,
             q11: (q[11] > 0.5) as u8,
         }
@@ -139,22 +141,22 @@ mod tests {
         let (b9, b10, b11): (u8, u8, u8) = (1, 0, 1);
 
         let raw: u32 = (i1 as u32)
-            | ((i3  as u32) << 4)
-            | ((i4  as u32) << 9)
-            | ((i8  as u32) << 12)
+            | ((i3 as u32) << 4)
+            | ((i4 as u32) << 9)
+            | ((i8 as u32) << 12)
             | ((i12 as u32) << 17)
-            | ((b9  as u32) << 21)
+            | ((b9 as u32) << 21)
             | ((b10 as u32) << 22)
             | ((b11 as u32) << 23);
         let packed: [u8; 3] = [raw as u8, (raw >> 8) as u8, (raw >> 16) as u8];
 
         let (ui1, ui3, ui4, ui8, ui12, ub9, ub10, ub11) = unpack_bits(&packed);
-        assert_eq!(ui1,  i1  as usize);
-        assert_eq!(ui3,  i3  as usize);
-        assert_eq!(ui4,  i4  as usize);
-        assert_eq!(ui8,  i8  as usize);
+        assert_eq!(ui1, i1 as usize);
+        assert_eq!(ui3, i3 as usize);
+        assert_eq!(ui4, i4 as usize);
+        assert_eq!(ui8, i8 as usize);
         assert_eq!(ui12, i12 as usize);
-        assert_eq!(ub9,  b9);
+        assert_eq!(ub9, b9);
         assert_eq!(ub10, b10);
         assert_eq!(ub11, b11);
     }
@@ -189,11 +191,11 @@ mod tests {
     #[test]
     fn partial_dists_binary_dims_reflect_query() {
         let mut q = [0.0f32; 14];
-        q[9]  = 1.0; // > 0.5 → q9 = 1
+        q[9] = 1.0; // > 0.5 → q9 = 1
         q[10] = 0.0; // ≤ 0.5 → q10 = 0
         q[11] = 1.0; // > 0.5 → q11 = 1
         let pd = PartialDists::compute(&q);
-        assert_eq!(pd.q9,  1);
+        assert_eq!(pd.q9, 1);
         assert_eq!(pd.q10, 0);
         assert_eq!(pd.q11, 1);
     }
@@ -216,20 +218,20 @@ pub fn pack_row_for_test(v: &[f32; 14], is_fraud: bool) -> [u8; 16] {
         best_idx
     }
 
-    let c0  = quantize(v[0]);
-    let c2  = quantize(v[2]);
-    let c5  = quantize(v[5]);
-    let c6  = quantize(v[6]);
-    let c7  = quantize(v[7]);
+    let c0 = quantize(v[0]);
+    let c2 = quantize(v[2]);
+    let c5 = quantize(v[5]);
+    let c6 = quantize(v[6]);
+    let c7 = quantize(v[7]);
     let c13 = quantize(v[13]);
 
-    let i1  = find_nearest(&DICT01, quantize(v[1]));
-    let i3  = find_nearest(&DICT03, quantize(v[3]));
-    let i4  = find_nearest(&DICT04, quantize(v[4]));
-    let i8  = find_nearest(&DICT08, quantize(v[8]));
+    let i1 = find_nearest(&DICT01, quantize(v[1]));
+    let i3 = find_nearest(&DICT03, quantize(v[3]));
+    let i4 = find_nearest(&DICT04, quantize(v[4]));
+    let i8 = find_nearest(&DICT08, quantize(v[8]));
     let i12 = find_nearest(&DICT12, quantize(v[12]));
 
-    let b9  = (v[9]  > 0.5) as u8;
+    let b9 = (v[9] > 0.5) as u8;
     let b10 = (v[10] > 0.5) as u8;
     let b11 = (v[11] > 0.5) as u8;
 

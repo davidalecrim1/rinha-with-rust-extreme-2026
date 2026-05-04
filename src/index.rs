@@ -1,66 +1,47 @@
-#[cfg(feature = "ivf")]
 use crate::packed_ref::quantize;
 use crate::packed_ref::{query_cont_bytes, unpack_bits, PartialDists};
 use crate::simd;
-#[cfg(feature = "ivf")]
+#[cfg(test)]
 use std::time::Instant;
 
 // 16-byte row layout (matches build.rs output):
-//   bytes  0–11 : [i16; 6] continuous dims (0, 2, 5, 6, 7, 13), native-endian
-//   bytes 12–14 : [u8; 3]  packed low-cardinality indices + binary flags
+//   bytes  0-11 : [i16; 6] continuous dims (0, 2, 5, 6, 7, 13), native-endian
+//   bytes 12-14 : [u8; 3]  packed low-cardinality indices + binary flags
 //   byte  15    : u8        fraud label (0 = legit, 1 = fraud)
 const ROW: usize = 16;
 
 // When two binary dims differ (one is 0, the other is 8192 quantized), the
 // squared distance is (8192 - 0)^2 = 67_108_864.
 const BIT_DIST_SQ: u64 = 8192 * 8192;
-
-#[cfg(feature = "ivf")]
 const K: usize = 1024;
-
-#[cfg(feature = "ivf")]
 const DEFAULT_PRIMARY_NPROBE: usize = 4;
-
-#[cfg(feature = "ivf")]
 const DEFAULT_REFINE_NPROBE: usize = 24;
-
-#[cfg(feature = "ivf")]
 const DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS: usize = 96;
-
-#[cfg(feature = "ivf")]
 const DEFAULT_REPAIR_MAX_EXTRA_ROWS: usize = 120_000;
+type IvfMetadata = (Vec<[f32; 14]>, Vec<u32>, Vec<[i16; 14]>, Vec<[i16; 14]>);
 
 pub struct FraudIndex {
     rows: Vec<[u8; 16]>,
-    #[cfg(feature = "ivf")]
     centroids: Vec<[f32; 14]>,
-    #[cfg(feature = "ivf")]
     offsets: Vec<u32>,
-    #[cfg(feature = "ivf")]
     bbox_min: Vec<[i16; 14]>,
-    #[cfg(feature = "ivf")]
     bbox_max: Vec<[i16; 14]>,
-    #[cfg(feature = "ivf")]
     primary_nprobe: usize,
-    #[cfg(feature = "ivf")]
     refine_nprobe: usize,
-    #[cfg(feature = "ivf")]
     ivf_repair: bool,
-    #[cfg(feature = "ivf")]
     repair_max_extra_clusters: usize,
-    #[cfg(feature = "ivf")]
     repair_max_extra_rows: usize,
 }
 
 impl FraudIndex {
     /// Load the pre-packed binary blob produced by build.rs.
-    /// No decompression, no JSON parsing — single memcpy from the binary's
+    /// No decompression, no JSON parsing, single memcpy from the binary's
     /// read-only data segment.
     pub fn build() -> Self {
         let raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/packed_refs.bin"));
 
         assert!(
-            raw.len() % ROW == 0,
+            raw.len().is_multiple_of(ROW),
             "packed_refs.bin size {} is not a multiple of {ROW}",
             raw.len()
         );
@@ -70,40 +51,33 @@ impl FraudIndex {
             rows.push(chunk.try_into().unwrap());
         }
 
-        #[cfg(feature = "ivf")]
         let (centroids, offsets, bbox_min, bbox_max) = Self::load_ivf_metadata();
 
-        #[cfg(feature = "ivf")]
         let legacy_nprobe = std::env::var("NPROBE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok());
 
-        #[cfg(feature = "ivf")]
         let primary_nprobe = std::env::var("IVF_PRIMARY_NPROBE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .or(legacy_nprobe)
             .unwrap_or(DEFAULT_PRIMARY_NPROBE);
 
-        #[cfg(feature = "ivf")]
         let refine_nprobe = std::env::var("IVF_REFINE_NPROBE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_REFINE_NPROBE);
 
-        #[cfg(feature = "ivf")]
         let ivf_repair = std::env::var("IVF_REPAIR")
             .map(|v| v != "0")
             .unwrap_or(true);
 
-        #[cfg(feature = "ivf")]
         let repair_max_extra_clusters = std::env::var("IVF_REPAIR_MAX_EXTRA_CLUSTERS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS)
             .min(K);
 
-        #[cfg(feature = "ivf")]
         let repair_max_extra_rows = std::env::var("IVF_REPAIR_MAX_EXTRA_ROWS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -111,29 +85,19 @@ impl FraudIndex {
 
         FraudIndex {
             rows,
-            #[cfg(feature = "ivf")]
             centroids,
-            #[cfg(feature = "ivf")]
             offsets,
-            #[cfg(feature = "ivf")]
             bbox_min,
-            #[cfg(feature = "ivf")]
             bbox_max,
-            #[cfg(feature = "ivf")]
             primary_nprobe,
-            #[cfg(feature = "ivf")]
             refine_nprobe,
-            #[cfg(feature = "ivf")]
             ivf_repair,
-            #[cfg(feature = "ivf")]
             repair_max_extra_clusters,
-            #[cfg(feature = "ivf")]
             repair_max_extra_rows,
         }
     }
 
-    #[cfg(feature = "ivf")]
-    fn load_ivf_metadata() -> (Vec<[f32; 14]>, Vec<u32>, Vec<[i16; 14]>, Vec<[i16; 14]>) {
+    fn load_ivf_metadata() -> IvfMetadata {
         let cent_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/centroids.bin"));
         let off_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_offsets.bin"));
         let bbox_min_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bbox_min.bin"));
@@ -170,12 +134,12 @@ impl FraudIndex {
 
         let mut centroids = Vec::with_capacity(K);
         for i in 0..K {
-            let mut c = [0.0f32; 14];
-            for d in 0..14 {
+            let mut centroid = [0.0f32; 14];
+            for (d, value) in centroid.iter_mut().enumerate() {
                 let offset = (i * 14 + d) * 4;
-                c[d] = f32::from_ne_bytes(cent_raw[offset..offset + 4].try_into().unwrap());
+                *value = f32::from_ne_bytes(cent_raw[offset..offset + 4].try_into().unwrap());
             }
-            centroids.push(c);
+            centroids.push(centroid);
         }
 
         let mut offsets = Vec::with_capacity(K + 1);
@@ -205,67 +169,13 @@ impl FraudIndex {
 
     /// Returns the fraud score for query vector `q` using k-NN with k=5.
     pub fn search(&self, q: &[f32; 14]) -> f32 {
-        #[cfg(feature = "ivf")]
-        {
-            return self.search_ivf(q);
-        }
-
-        #[cfg(not(feature = "ivf"))]
-        {
-            self.search_brute_force(q)
-        }
+        self.search_ivf(q).score
     }
 
-    /// Brute-force scan over all rows.
-    #[cfg(any(not(feature = "ivf"), test))]
-    fn search_brute_force(&self, q: &[f32; 14]) -> f32 {
-        let q_cont = query_cont_bytes(q);
-        let pd = PartialDists::compute(q);
-
-        let mut neighbors: [Neighbor; 5] = [Neighbor::empty(); 5];
-        let (mut worst_slot, mut worst_dist) = (0usize, u64::MAX);
-
-        #[cfg(target_arch = "x86_64")]
-        let (q_simd, zero_lanes_mask) = unsafe {
-            use std::arch::x86_64::*;
-            let q_v = simd::load_m128(&q_cont);
-            let mask = _mm_set_epi32(0, 0, -1i32, -1i32);
-            (q_v, mask)
-        };
-
-        scan_rows(
-            &self.rows,
-            0,
-            &q_cont,
-            &pd,
-            #[cfg(target_arch = "x86_64")]
-            q_simd,
-            #[cfg(target_arch = "x86_64")]
-            zero_lanes_mask,
-            &mut neighbors,
-            &mut worst_slot,
-            &mut worst_dist,
-        );
-
-        fraud_votes(&neighbors) as f32 / 5.0
-    }
-
-    /// IVF search with decision-aware refinement.
-    #[cfg(feature = "ivf")]
-    fn search_ivf(&self, q: &[f32; 14]) -> f32 {
+    fn search_ivf(&self, q: &[f32; 14]) -> IvfSearchStats {
         self.search_ivf_decision_aware(q, self.primary_nprobe, self.refine_nprobe, self.ivf_repair)
-            .score
     }
 
-    /// IVF search with configurable nprobe (for benchmarking).
-    #[cfg(feature = "ivf")]
-    #[allow(dead_code)]
-    fn search_ivf_n(&self, q: &[f32; 14], nprobe: usize) -> f32 {
-        self.search_ivf_decision_aware(q, nprobe, nprobe, self.ivf_repair)
-            .score
-    }
-
-    #[cfg(feature = "ivf")]
     fn search_ivf_decision_aware(
         &self,
         q: &[f32; 14],
@@ -273,24 +183,22 @@ impl FraudIndex {
         refine_nprobe: usize,
         repair: bool,
     ) -> IvfSearchStats {
+        #[cfg(test)]
         let started = Instant::now();
         let primary_nprobe = primary_nprobe.clamp(1, K);
         let refine_nprobe = refine_nprobe.clamp(primary_nprobe, K);
 
-        // 1. Compute distance from query to all K centroids
         let mut cdists: Vec<(f32, u16)> = Vec::with_capacity(K);
-        for (i, c) in self.centroids.iter().enumerate() {
-            cdists.push((l2_f32(q, c), i as u16));
+        for (i, centroid) in self.centroids.iter().enumerate() {
+            cdists.push((l2_f32(q, centroid), i as u16));
         }
 
-        // 2. Sort centroids once; K=1024 is small and deterministic ordering helps tests.
         cdists.sort_unstable_by(|a, b| {
             a.0.partial_cmp(&b.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.cmp(&b.1))
         });
 
-        // 3. Prepare query state
         let q_cont = query_cont_bytes(q);
         let pd = PartialDists::compute(q);
 
@@ -305,19 +213,23 @@ impl FraudIndex {
         let mut neighbors: [Neighbor; 5] = [Neighbor::empty(); 5];
         let (mut worst_slot, mut worst_dist) = (0usize, u64::MAX);
         let mut scanned = [false; K];
+        #[cfg(test)]
         let mut clusters_scanned = 0usize;
+        #[cfg(test)]
         let mut rows_scanned = 0usize;
         let mut extra_clusters_scanned = 0usize;
         let mut extra_rows_scanned = 0usize;
 
-        // 4. Primary pass scans cheap nearest clusters first.
         for &(_, cluster_id) in &cdists[..primary_nprobe] {
             let cluster_id = cluster_id as usize;
             let start = self.offsets[cluster_id] as usize;
             let end = self.offsets[cluster_id + 1] as usize;
             scanned[cluster_id] = true;
-            clusters_scanned += 1;
-            rows_scanned += end - start;
+            #[cfg(test)]
+            {
+                clusters_scanned += 1;
+                rows_scanned += end - start;
+            }
 
             scan_rows(
                 &self.rows[start..end],
@@ -383,9 +295,12 @@ impl FraudIndex {
                 }
 
                 scanned[cluster_id] = true;
-                clusters_scanned += 1;
+                #[cfg(test)]
+                {
+                    clusters_scanned += 1;
+                    rows_scanned += cluster_rows;
+                }
                 extra_clusters_scanned += 1;
-                rows_scanned += cluster_rows;
                 extra_rows_scanned += cluster_rows;
 
                 scan_rows(
@@ -406,27 +321,72 @@ impl FraudIndex {
 
         IvfSearchStats {
             score: fraud_votes(&neighbors) as f32 / 5.0,
+            #[cfg(test)]
             refined: extra_clusters_scanned > 0,
+            #[cfg(test)]
             primary_fraud_votes,
+            #[cfg(test)]
             clusters_scanned,
+            #[cfg(test)]
             rows_scanned,
+            #[cfg(test)]
             extra_clusters_scanned,
+            #[cfg(test)]
             extra_rows_scanned,
+            #[cfg(test)]
             elapsed_nanos: started.elapsed().as_nanos(),
         }
     }
+
+    #[cfg(test)]
+    fn search_exact(&self, q: &[f32; 14]) -> f32 {
+        let q_cont = query_cont_bytes(q);
+        let pd = PartialDists::compute(q);
+
+        let mut neighbors: [Neighbor; 5] = [Neighbor::empty(); 5];
+        let (mut worst_slot, mut worst_dist) = (0usize, u64::MAX);
+
+        #[cfg(target_arch = "x86_64")]
+        let (q_simd, zero_lanes_mask) = unsafe {
+            use std::arch::x86_64::*;
+            let q_v = simd::load_m128(&q_cont);
+            let mask = _mm_set_epi32(0, 0, -1i32, -1i32);
+            (q_v, mask)
+        };
+
+        scan_rows(
+            &self.rows,
+            0,
+            &q_cont,
+            &pd,
+            #[cfg(target_arch = "x86_64")]
+            q_simd,
+            #[cfg(target_arch = "x86_64")]
+            zero_lanes_mask,
+            &mut neighbors,
+            &mut worst_slot,
+            &mut worst_dist,
+        );
+
+        fraud_votes(&neighbors) as f32 / 5.0
+    }
 }
 
-#[cfg(feature = "ivf")]
-#[allow(dead_code)]
 struct IvfSearchStats {
     score: f32,
+    #[cfg(test)]
     refined: bool,
+    #[cfg(test)]
     primary_fraud_votes: usize,
+    #[cfg(test)]
     clusters_scanned: usize,
+    #[cfg(test)]
     rows_scanned: usize,
+    #[cfg(test)]
     extra_clusters_scanned: usize,
+    #[cfg(test)]
     extra_rows_scanned: usize,
+    #[cfg(test)]
     elapsed_nanos: u128,
 }
 
@@ -451,12 +411,11 @@ fn fraud_votes(neighbors: &[Neighbor; 5]) -> usize {
     neighbors.iter().filter(|n| n.is_fraud).count()
 }
 
-#[cfg(feature = "ivf")]
 fn is_ambiguous(fraud_votes: usize) -> bool {
     fraud_votes == 2 || fraud_votes == 3
 }
 
-/// Shared inner scan loop used by both brute-force and IVF paths.
+/// Shared inner scan loop used by IVF and exact-search tests.
 /// Scans `rows` computing distance = SIMD_cont + table_lookup_discrete + binary,
 /// updating the top-5 neighbor tracker.
 #[inline(always)]
@@ -496,19 +455,20 @@ fn scan_rows(
             + pd.d12[i12] as u64;
 
         let binary: u64 = bit_sq(b9, pd.q9) + bit_sq(b10, pd.q10) + bit_sq(b11, pd.q11);
-
         let dist = cont + discrete + binary;
-
         let id = base_id + offset as u32;
+
         if dist < *worst_dist || (dist == *worst_dist && id < neighbors[*worst_slot].id) {
-            let is_fraud = row[15] != 0;
-            neighbors[*worst_slot] = Neighbor { dist, id, is_fraud };
+            neighbors[*worst_slot] = Neighbor {
+                dist,
+                id,
+                is_fraud: row[15] != 0,
+            };
             (*worst_slot, *worst_dist) = find_worst(neighbors);
         }
     }
 }
 
-/// Returns BIT_DIST_SQ when binary dims differ, 0 when equal.
 #[inline(always)]
 fn bit_sq(r: u8, q: u8) -> u64 {
     if r == q {
@@ -518,7 +478,6 @@ fn bit_sq(r: u8, q: u8) -> u64 {
     }
 }
 
-/// Returns the index and distance of the farthest neighbor in the top-5.
 fn find_worst(neighbors: &[Neighbor; 5]) -> (usize, u64) {
     let mut worst_slot = 0usize;
     let mut worst = neighbors[0];
@@ -531,7 +490,6 @@ fn find_worst(neighbors: &[Neighbor; 5]) -> (usize, u64) {
     (worst_slot, worst.dist)
 }
 
-#[cfg(feature = "ivf")]
 fn quantized_search_vector(q: &[f32; 14]) -> [i16; 14] {
     [
         quantize(q[0]),
@@ -567,7 +525,6 @@ fn bbox_lower_bound_sq(q: &[i16; 14], mins: &[i16; 14], maxes: &[i16; 14]) -> u6
     sum
 }
 
-#[cfg(feature = "ivf")]
 #[inline(always)]
 fn l2_f32(a: &[f32; 14], b: &[f32; 14]) -> f32 {
     let mut sum = 0.0f32;
@@ -590,23 +547,14 @@ mod tests {
             .collect();
         FraudIndex {
             rows,
-            #[cfg(feature = "ivf")]
             centroids: Vec::new(),
-            #[cfg(feature = "ivf")]
             offsets: Vec::new(),
-            #[cfg(feature = "ivf")]
             bbox_min: Vec::new(),
-            #[cfg(feature = "ivf")]
             bbox_max: Vec::new(),
-            #[cfg(feature = "ivf")]
             primary_nprobe: DEFAULT_PRIMARY_NPROBE,
-            #[cfg(feature = "ivf")]
             refine_nprobe: DEFAULT_REFINE_NPROBE,
-            #[cfg(feature = "ivf")]
             ivf_repair: true,
-            #[cfg(feature = "ivf")]
             repair_max_extra_clusters: DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS,
-            #[cfg(feature = "ivf")]
             repair_max_extra_rows: DEFAULT_REPAIR_MAX_EXTRA_ROWS,
         }
     }
@@ -622,7 +570,7 @@ mod tests {
             (ZERO, true),
             (ZERO, true),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 1.0);
+        assert_eq!(idx.search_exact(&ZERO), 1.0);
     }
 
     #[test]
@@ -634,7 +582,7 @@ mod tests {
             (ZERO, false),
             (ZERO, false),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 0.0);
+        assert_eq!(idx.search_exact(&ZERO), 0.0);
     }
 
     #[test]
@@ -646,12 +594,11 @@ mod tests {
             (ZERO, false),
             (ZERO, false),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 0.6);
+        assert_eq!(idx.search_exact(&ZERO), 0.6);
     }
 
     #[test]
     fn search_nearest_neighbors_win() {
-        // 5 fraud vectors close to origin; 1 legit far away — top-5 must all be fraud.
         let close = [0.01f32; 14];
         let far = [0.9f32; 14];
         let idx = make_index(&[
@@ -662,7 +609,7 @@ mod tests {
             (close, true),
             (far, false),
         ]);
-        assert_eq!(idx.search_brute_force(&ZERO), 1.0);
+        assert_eq!(idx.search_exact(&ZERO), 1.0);
     }
 
     #[test]
@@ -715,7 +662,6 @@ mod tests {
         assert!(bbox_lower_bound_sq(&q, &mins, &maxes) <= exact);
     }
 
-    #[cfg(feature = "ivf")]
     fn make_two_cluster_ivf_index(
         primary_entries: &[([f32; 14], bool)],
         repair_entries: &[([f32; 14], bool)],
@@ -764,7 +710,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "ivf")]
     fn set_bbox(mins: &mut [i16; 14], maxes: &mut [i16; 14], entries: &[([f32; 14], bool)]) {
         *mins = [i16::MAX; 14];
         *maxes = [i16::MIN; 14];
@@ -777,7 +722,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "ivf")]
     fn ambiguous_primary_entries() -> Vec<([f32; 14], bool)> {
         let far = [0.9f32; 14];
         vec![
@@ -789,7 +733,6 @@ mod tests {
         ]
     }
 
-    #[cfg(feature = "ivf")]
     fn near_repair_entries() -> Vec<([f32; 14], bool)> {
         vec![
             (ZERO, true),
@@ -800,7 +743,6 @@ mod tests {
         ]
     }
 
-    #[cfg(feature = "ivf")]
     #[test]
     fn clear_primary_vote_skips_repair() {
         let far = [0.9f32; 14];
@@ -822,7 +764,6 @@ mod tests {
         assert_eq!(stats.extra_rows_scanned, 0);
     }
 
-    #[cfg(feature = "ivf")]
     #[test]
     fn ambiguous_primary_vote_triggers_refine() {
         let primary = ambiguous_primary_entries();
@@ -840,12 +781,11 @@ mod tests {
         assert_eq!(pure.score, 0.4);
         assert_eq!(repaired.primary_fraud_votes, 2);
         assert!(repaired.refined);
-        assert_eq!(repaired.score, idx.search_brute_force(&ZERO));
+        assert_eq!(repaired.score, idx.search_exact(&ZERO));
         assert_eq!(repaired.score, 1.0);
         assert!(repaired.clusters_scanned > pure.clusters_scanned);
     }
 
-    #[cfg(feature = "ivf")]
     #[test]
     fn row_budget_stops_repair() {
         let primary = ambiguous_primary_entries();
@@ -860,7 +800,6 @@ mod tests {
         assert_eq!(stats.score, 0.4);
     }
 
-    #[cfg(feature = "ivf")]
     #[test]
     fn cluster_cap_stops_repair() {
         let primary = ambiguous_primary_entries();
@@ -885,22 +824,19 @@ mod tests {
             (ZERO, false),
         ]);
 
-        assert_eq!(idx.search_brute_force(&ZERO), 0.6);
+        assert_eq!(idx.search_exact(&ZERO), 0.6);
     }
 
     /// IVF recall benchmark: compare IVF at various nprobe values against
-    /// brute-force ground truth on the full compiled-in dataset.
-    /// Run with: cargo test --features ivf --release -- --nocapture recall_benchmark
-    #[cfg(feature = "ivf")]
+    /// exact-search ground truth on the full compiled-in dataset.
+    /// Run with: cargo test --release -- --nocapture recall_benchmark
     #[test]
+    #[ignore = "benchmark-style test over the full embedded dataset"]
     fn recall_benchmark() {
         let idx = FraudIndex::build();
 
-        // Generate query vectors spanning the input space.
-        // Mix of "corner" vectors and pseudo-random ones for coverage.
         let mut queries: Vec<[f32; 14]> = Vec::new();
 
-        // Systematic grid: vary each dimension while others stay at 0.5
         for dim in 0..14 {
             for &val in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
                 let mut q = [0.5f32; 14];
@@ -909,30 +845,27 @@ mod tests {
             }
         }
 
-        // Corners and extremes
         queries.push([0.0; 14]);
         queries.push([1.0; 14]);
         queries.push([0.5; 14]);
 
-        // Pseudo-random queries using a simple LCG (no rand dependency in test)
         let mut seed: u64 = 42;
         for _ in 0..500 {
             let mut q = [0.0f32; 14];
-            for d in 0..14 {
+            for value in &mut q {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                q[d] = ((seed >> 33) as f32) / (u32::MAX as f32 / 2.0);
-                q[d] = q[d].clamp(0.0, 1.0);
+                *value = ((seed >> 33) as f32) / (u32::MAX as f32 / 2.0);
+                *value = value.clamp(0.0, 1.0);
             }
             queries.push(q);
         }
 
         let n = queries.len();
 
-        // Compute brute-force ground truth ONCE for all queries
-        eprintln!("\nComputing brute-force ground truth for {} queries...", n);
-        let bf_scores: Vec<f32> = queries.iter().map(|q| idx.search_brute_force(q)).collect();
+        eprintln!("\nComputing exact-search ground truth for {} queries...", n);
+        let bf_scores: Vec<f32> = queries.iter().map(|q| idx.search_exact(q)).collect();
         eprintln!("Ground truth computed.");
 
         let row_budgets = [80_000usize, 120_000, 180_000];
@@ -980,20 +913,20 @@ mod tests {
             }
 
             latencies.sort_unstable();
-            let p99_idx = (latencies.len() * 99 / 100).min(latencies.len() - 1);
+            let p99_idx = ((n as f64 * 0.99).ceil() as usize).saturating_sub(1);
+            let p99_us = latencies[p99_idx] as f64 / 1_000.0;
 
             eprintln!(
-                "{:>10} {:>11.2}% {:>11.2}% {:>10.2}% {:>14.0} {:>12.1} {:>12.0} {:>12}",
+                "{:>10} {:>11.2}% {:>11.2}% {:>10.2}% {:>14.0} {:>12.1} {:>12.0} {:>12.1}",
                 row_budget,
-                score_matches as f64 / n as f64 * 100.0,
-                decision_matches as f64 / n as f64 * 100.0,
-                refined as f64 / n as f64 * 100.0,
+                score_matches as f64 * 100.0 / n as f64,
+                decision_matches as f64 * 100.0 / n as f64,
+                refined as f64 * 100.0 / n as f64,
                 extra_rows_scanned as f64 / n as f64,
                 clusters_scanned as f64 / n as f64,
                 rows_scanned as f64 / n as f64,
-                latencies[p99_idx] / 1_000,
+                p99_us
             );
         }
-        eprintln!("=== End Benchmark ===\n");
     }
 }

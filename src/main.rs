@@ -64,11 +64,14 @@ async fn main() {
                 _ = sigterm.recv() => {}
             }
             if let Some(guard) = g.lock().unwrap().take() {
-                let report = guard.report().build().expect("failed to build profile report");
+                let report = guard
+                    .report()
+                    .build()
+                    .expect("failed to build profile report");
 
                 let mut file = std::fs::File::create("/profile/profile.folded").unwrap();
-                use std::io::Write;
                 use std::fmt::Write as FmtWrite;
+                use std::io::Write;
                 for (key, count) in report.data.iter() {
                     let mut line = key.thread_name_or_id();
                     line.push(';');

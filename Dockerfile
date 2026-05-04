@@ -9,7 +9,7 @@ COPY resources ./resources
 # BMI1/2, POPCNT.  More complete than listing individual features manually.
 # The musl target produces a fully static binary with no libc dependency.
 ENV RUSTFLAGS="-C target-cpu=haswell -C target-feature=+avx2,+fma,+f16c,+bmi2,+popcnt -C link-arg=-s"
-RUN cargo build --release --features ivf --target x86_64-unknown-linux-musl
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
 FROM busybox:musl
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/rinha /rinha

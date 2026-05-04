@@ -45,11 +45,11 @@ pub unsafe fn load_m128(buf: &[u8; 16]) -> __m128i {
 #[inline]
 pub unsafe fn dist_cont(q: __m128i, r: __m128i) -> u32 {
     let diff = _mm_sub_epi16(q, r);
-    let sq   = _mm_madd_epi16(diff, diff);
+    let sq = _mm_madd_epi16(diff, diff);
 
     // Horizontal sum of 4 i32 lanes.
     let s = _mm_add_epi32(sq, _mm_srli_si128(sq, 8));
-    let s = _mm_add_epi32(s,  _mm_srli_si128(s,  4));
+    let s = _mm_add_epi32(s, _mm_srli_si128(s, 4));
 
     _mm_cvtsi128_si32(s) as u32
 }
@@ -154,7 +154,7 @@ mod tests {
         // Each continuous slot (0-5) has diff = 1 → total sq_dist = 6.
         // Slots 6-7 are zero in both buffers, so they add 0.
         let mut q_buf = [0u8; 16];
-        let r_buf    = [0u8; 16];
+        let r_buf = [0u8; 16];
         for slot in 0..6 {
             q_buf[slot * 2..slot * 2 + 2].copy_from_slice(&1i16.to_ne_bytes());
         }

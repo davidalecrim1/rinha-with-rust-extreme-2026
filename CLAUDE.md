@@ -47,7 +47,7 @@ nginx (0.05 CPU / 15MB)  ← listens on :9999, round-robin
 | Decision | Choice | Reason |
 |---|---|---|
 | HTTP framework | `axum` | tokio-native, clean serde integration, tower overhead negligible at this scale |
-| KNN search | IVF (K=1024 centroids, nprobe=50 default) over 16-byte quantized rows, AVX2 via `-C target-cpu=haswell` | ~20× fewer rows scanned vs brute-force; SIMD inner loop; nprobe tunable via env var |
+| KNN search | IVF (K=1024 centroids, bounded refinement) over 16-byte quantized rows, AVX2 via `-C target-cpu=haswell` | clustered scan only; SIMD inner loop; probe and repair budgets tunable via env var |
 | Top-5 selection | Fixed array of 5 slots, linear eviction scan, O(N) | Avoids full sort; single pass over distances |
 | Async runtime | `tokio`, `worker_threads = 1` | Matches 0.475 CPU quota; eliminates thread contention, same reasoning as Go's `GOMAXPROCS=1` |
 | JSON | `serde_json` | Payload is ~200 bytes — simd-json gains (~1-2µs) don't justify axum extractor incompatibility |
@@ -60,7 +60,7 @@ Business logic must not leak into handlers. Each module has a single responsibil
 - **`main.rs`**: wires modules, loads embedded resources, sets the readiness flag
 - **`handler.rs`**: deserialize → call `vectorizer::vectorize()` → call `index::search()` → serialize. No scoring logic.
 - **`vectorizer.rs`**: transaction payload → `[f32; 14]`. Pure data transformation.
-- **`index.rs`**: owns the packed `Vec<[u8; 16]>` reference buffer and IVF centroid/offset tables. Exposes only `fn search(vector: &[f32; 14]) -> f32` returning `fraud_score`. Swap the search strategy (brute-force vs IVF, nprobe) by touching only this file.
+- **`index.rs`**: owns the packed `Vec<[u8; 16]>` reference buffer and IVF centroid/offset tables. Exposes only `fn search(vector: &[f32; 14]) -> f32` returning `fraud_score`. Probe counts and repair budgets live here.
 - **`packed_ref.rs`**: 16-byte row encoding — 6 continuous dims as i16, 5 discrete dims as dictionary indices, 3 binary dims as bits, 1 label byte. Pre-computed partial distances (`PartialDists`) eliminate per-row arithmetic for low-cardinality dims.
 - **`simd.rs`**: AVX2 distance kernel for the 6 continuous dims.
 
