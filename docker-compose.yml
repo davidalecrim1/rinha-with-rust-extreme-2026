@@ -14,16 +14,18 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
+          cpus: "0.10"
           memory: "15MB"
 
   api1:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.2
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.3
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
-      - NPROBE=4
-      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=32
+      - IVF_PRIMARY_NPROBE=4
+      - IVF_REFINE_NPROBE=24
+      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=96
+      - IVF_REPAIR_MAX_EXTRA_ROWS=180000
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -34,16 +36,18 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.45"
           memory: "167MB"
 
   api2:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.2
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.3
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
-      - NPROBE=4
-      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=32
+      - IVF_PRIMARY_NPROBE=4
+      - IVF_REFINE_NPROBE=24
+      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=96
+      - IVF_REPAIR_MAX_EXTRA_ROWS=180000
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -54,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.45"
           memory: "167MB"
 
 volumes:
