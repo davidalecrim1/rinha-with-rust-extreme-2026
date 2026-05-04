@@ -59,7 +59,8 @@ src/
 
 ```bash
 cargo test                     # run unit tests
-make run                       # start local stack via docker-compose.local.yml
+make build                     # build the latest local Docker image
+make run                       # start local stack from the latest built image
 bash scripts/check-health.sh   # smoke test with two known payloads
 bash scripts/run-example-payloads.sh  # validate all 50 example payloads
 ```

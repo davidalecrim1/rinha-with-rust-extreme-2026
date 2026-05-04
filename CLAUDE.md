@@ -125,3 +125,9 @@ HTTP 500s are the worst outcome — weight 5 and count toward the failure rate c
 **Parse at the boundary**: validate and parse external input in the serde types, not in business logic. Use `DateTime<FixedOffset>` rather than `String` for timestamps so that invalid dates are rejected at deserialization with a clean 422, before reaching `vectorize`.
 
 **Safe startup panics must have `.expect("message")`** — never bare `.unwrap()` on embedded resource parsing, so crash messages are actionable.
+
+## Task completion
+
+Always run `make lint` at the end of a task.
+
+Use `make build` when source changes need a fresh Docker image. Then run `make build && make release` for releases, or `make build && make official-load-test` for official load testing. `make run` only starts the latest built image; it does not rebuild.

@@ -1,6 +1,6 @@
 DOCKER_IMAGE := davidalecrim1/rinha-rust-extreme-2026
 
-.PHONY: lint run test release load-test official-load-test profile fetch-test-data
+.PHONY: lint build run test release load-test official-load-test profile fetch-test-data
 
 lint:
 	cargo fmt --check
@@ -11,8 +11,11 @@ test:
 	rustup target add x86_64-apple-darwin
 	cargo test --target x86_64-apple-darwin
 
+build:
+	docker build --platform linux/amd64 -t $(DOCKER_IMAGE):latest .
+
 run:
-	docker compose -f docker-compose.local.yml up --build -d
+	docker compose -f docker-compose.yml up -d
 
 fetch-test-data:
 	cp ../rinha-de-backend-2026/test/test-data.json scripts/test-data.json
@@ -26,7 +29,7 @@ load-test: run
 	k6 run --env VERSION=$(CURRENT_TAG) scripts/load-test.js
 
 official-load-test:
-	docker compose -f docker-compose.local.yml -f docker-compose.local.uncapped.yml up --build -d
+	docker compose -f docker-compose.yml -f docker-compose.local.uncapped.yml up -d
 	@echo "Waiting for stack to be ready..."
 	@until curl -sf http://localhost:9999/ready >/dev/null 2>&1; do sleep 1; done
 	@echo "Stack ready. Running official load test..."
@@ -48,17 +51,19 @@ profile:
 	@echo "Collapsed stacks: profile-api1/profile.folded, profile-api2/profile.folded"
 	@echo "Flamegraph SVGs:  profile-api1/profile.svg, profile-api2/profile.svg"
 
-# Tags, builds, and publishes a linux/amd64 release image, then updates the
+# Tags and publishes the latest locally built linux/amd64 image, then updates the
 # submission branch. Pass VERSION explicitly to control the tag:
 #   make release VERSION=v0.7.0
 # When VERSION is not set, the patch of the latest tag is incremented.
+# Run `make build` first when source changes need to be included.
 release:
 	$(eval LAST_TAG := $(shell git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1))
 	$(eval VERSION := $(or $(VERSION),$(if $(LAST_TAG),$(shell echo $(LAST_TAG) | awk -F. '{print $$1"."$$2"."$$3+1}'),v0.1.0)))
 	@echo "Releasing $(VERSION)"
+	@docker image inspect $(DOCKER_IMAGE):latest >/dev/null || { echo "Missing $(DOCKER_IMAGE):latest. Run make build first."; exit 1; }
 	git tag $(VERSION)
 	git push origin $(VERSION)
-	docker build --platform linux/amd64 -t $(DOCKER_IMAGE):$(VERSION) -t $(DOCKER_IMAGE):latest .
+	docker tag $(DOCKER_IMAGE):latest $(DOCKER_IMAGE):$(VERSION)
 	docker push $(DOCKER_IMAGE):$(VERSION)
 	docker push $(DOCKER_IMAGE):latest
 	@echo "Updating submission branch..."
