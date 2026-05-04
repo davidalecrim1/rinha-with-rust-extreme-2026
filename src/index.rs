@@ -21,6 +21,9 @@ const K: usize = 1024;
 #[cfg(feature = "ivf")]
 const DEFAULT_NPROBE: usize = 50;
 
+#[cfg(feature = "ivf")]
+const DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS: usize = 32;
+
 pub struct FraudIndex {
     rows: Vec<[u8; 16]>,
     #[cfg(feature = "ivf")]
@@ -35,6 +38,8 @@ pub struct FraudIndex {
     nprobe: usize,
     #[cfg(feature = "ivf")]
     ivf_repair: bool,
+    #[cfg(feature = "ivf")]
+    repair_max_extra_clusters: usize,
 }
 
 impl FraudIndex {
@@ -69,6 +74,13 @@ impl FraudIndex {
             .map(|v| v != "0")
             .unwrap_or(true);
 
+        #[cfg(feature = "ivf")]
+        let repair_max_extra_clusters = std::env::var("IVF_REPAIR_MAX_EXTRA_CLUSTERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS)
+            .min(K);
+
         FraudIndex {
             rows,
             #[cfg(feature = "ivf")]
@@ -83,6 +95,8 @@ impl FraudIndex {
             nprobe,
             #[cfg(feature = "ivf")]
             ivf_repair,
+            #[cfg(feature = "ivf")]
+            repair_max_extra_clusters,
         }
     }
 
@@ -280,25 +294,45 @@ impl FraudIndex {
             );
         }
 
-        if repair {
+        if repair && self.repair_max_extra_clusters > 0 {
             let q_quantized = quantized_search_vector(q);
+            let mut repair_candidates: Vec<(u64, u16)> =
+                Vec::with_capacity(K.saturating_sub(nprobe));
+
             for cluster_id in 0..K {
                 if scanned[cluster_id] {
                     continue;
                 }
-                if bbox_lower_bound_sq(
+
+                let lower_bound = bbox_lower_bound_sq(
                     &q_quantized,
                     &self.bbox_min[cluster_id],
                     &self.bbox_max[cluster_id],
-                ) > worst_dist
-                {
+                );
+                if lower_bound > worst_dist {
                     continue;
                 }
 
+                repair_candidates.push((lower_bound, cluster_id as u16));
+            }
+
+            repair_candidates.sort_unstable_by_key(|&(lower_bound, _)| lower_bound);
+
+            let mut extra_clusters_scanned = 0usize;
+            for (lower_bound, cluster_id) in repair_candidates {
+                if extra_clusters_scanned >= self.repair_max_extra_clusters {
+                    break;
+                }
+                if lower_bound > worst_dist {
+                    break;
+                }
+
+                let cluster_id = cluster_id as usize;
                 let start = self.offsets[cluster_id] as usize;
                 let end = self.offsets[cluster_id + 1] as usize;
                 scanned[cluster_id] = true;
                 clusters_scanned += 1;
+                extra_clusters_scanned += 1;
                 rows_scanned += end - start;
 
                 scan_rows(
@@ -479,6 +513,8 @@ mod tests {
             nprobe: DEFAULT_NPROBE,
             #[cfg(feature = "ivf")]
             ivf_repair: true,
+            #[cfg(feature = "ivf")]
+            repair_max_extra_clusters: DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS,
         }
     }
 
@@ -622,6 +658,7 @@ mod tests {
             bbox_max,
             nprobe: 1,
             ivf_repair: true,
+            repair_max_extra_clusters: DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS,
         }
     }
 

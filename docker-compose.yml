@@ -22,7 +22,8 @@ services:
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
-      - NPROBE=20
+      - NPROBE=4
+      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=32
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -41,7 +42,8 @@ services:
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
-      - NPROBE=20
+      - NPROBE=4
+      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=32
     volumes:
       - api-sockets:/var/run
     healthcheck:

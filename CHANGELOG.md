@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.2
+- Bound IVF bbox repair with `IVF_REPAIR_MAX_EXTRA_CLUSTERS=32` and lower `NPROBE` to `4` to avoid official-limit backpressure
+- Add explicit Haswell SIMD target features and strip symbols in the release Docker build
+- Capped local Rinha load test: final score 2099.67, p99 31.36ms, 0 HTTP errors, 366 false positives, 385 false negatives
+
 ## v0.8.1
 - Add IVF bounding-box repair pass to revisit only unscanned clusters whose 14-dim quantized bounds can still beat the current top-5 worst distance
 - Official local Rinha load test: final score 5383.76, p99 3.36ms, zero HTTP errors
