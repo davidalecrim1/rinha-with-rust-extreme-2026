@@ -18,11 +18,12 @@ services:
           memory: "15MB"
 
   api1:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.1
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.2
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
-      - NPROBE=20
+      - NPROBE=4
+      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=32
     volumes:
       - api-sockets:/var/run
     healthcheck:
@@ -37,11 +38,12 @@ services:
           memory: "167MB"
 
   api2:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.1
+    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.2
     platform: linux/amd64
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
-      - NPROBE=20
+      - NPROBE=4
+      - IVF_REPAIR_MAX_EXTRA_CLUSTERS=32
     volumes:
       - api-sockets:/var/run
     healthcheck:
