@@ -1,4 +1,4 @@
-# rinha-with-rust-2026
+# Fraud Detection System - Rinha de Backend Competition (Edition 2026)
 
 Rust submission for [rinha-de-backend-2026](https://github.com/zanfranceschi/rinha-de-backend-2026) — a fraud detection API competition scored on p99 latency and detection accuracy.
 
