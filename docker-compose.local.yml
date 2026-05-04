@@ -18,8 +18,9 @@ services:
           memory: "15MB"
 
   api1:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.4
-    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.local
     environment:
       - UNIX_SOCKET=/var/run/api1.sock
       - IVF_PRIMARY_NPROBE=4
@@ -40,8 +41,9 @@ services:
           memory: "167MB"
 
   api2:
-    image: davidalecrim1/rinha-rust-extreme-2026:v0.8.4
-    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.local
     environment:
       - UNIX_SOCKET=/var/run/api2.sock
       - IVF_PRIMARY_NPROBE=4
