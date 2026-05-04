@@ -1,4 +1,6 @@
 target/
+target-clippy/
+target-test/
 profile-api1/
 profile-api2/
 .DS_Store
