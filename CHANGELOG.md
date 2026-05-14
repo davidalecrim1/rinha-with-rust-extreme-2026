@@ -1,9 +1,12 @@
 # Changelog
 
-## v0.8.5
+## v0.8.6
 - AVX2+FMA column-major centroid distance computation; thread-local scratch buffers eliminate per-request heap allocation for centroid distances and repair candidates
 - Prebuilt static HTTP responses indexed by fraud vote count (0–5); zero serde_json on the hot path
-- Official load test: final score 4343.84, p99 23.44ms, 0 HTTP errors, 2 false positives, 2 false negatives
+- Fixed k-means seed (42) for deterministic clustering across all builds and architectures
+
+## v0.8.5
+- Identical algorithm to v0.8.6 but built with unseeded k-means; poor clustering on competition hardware produced 366 FP / 386 FN — do not use
 
 ## v0.8.4
 - Remove the brute-force production path and keep IVF as the only search mode
