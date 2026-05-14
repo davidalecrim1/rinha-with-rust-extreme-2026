@@ -1,5 +1,5 @@
 use chrono::{DateTime, FixedOffset};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct FraudRequest {
@@ -44,12 +44,6 @@ pub struct Terminal {
 pub struct LastTransaction {
     pub timestamp: DateTime<FixedOffset>,
     pub km_from_current: f64,
-}
-
-#[derive(Serialize)]
-pub struct FraudResponse {
-    pub approved: bool,
-    pub fraud_score: f32,
 }
 
 #[derive(Deserialize)]

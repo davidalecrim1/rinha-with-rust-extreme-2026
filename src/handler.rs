@@ -1,7 +1,9 @@
 use axum::{
+    body::Body,
     extract::{Json, State},
-    http::StatusCode,
+    http::{header, Response, StatusCode},
 };
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -9,7 +11,7 @@ use std::sync::{
 };
 
 use crate::index::FraudIndex;
-use crate::types::{FraudRequest, FraudResponse, NormConsts};
+use crate::types::{FraudRequest, NormConsts};
 use crate::vectorizer::vectorize;
 
 #[derive(Clone)]
@@ -20,6 +22,17 @@ pub struct AppState {
     pub mcc_risk: Arc<HashMap<String, f32>>,
 }
 
+// All 6 possible responses indexed by fraud vote count (0..=5).
+// Prebuilt at compile time: zero serde_json serialization on the hot path.
+static FRAUD_BODIES: [&[u8]; 6] = [
+    b"{\"approved\":true,\"fraud_score\":0.0}",
+    b"{\"approved\":true,\"fraud_score\":0.2}",
+    b"{\"approved\":true,\"fraud_score\":0.4}",
+    b"{\"approved\":false,\"fraud_score\":0.6}",
+    b"{\"approved\":false,\"fraud_score\":0.8}",
+    b"{\"approved\":false,\"fraud_score\":1.0}",
+];
+
 pub async fn ready(State(s): State<AppState>) -> StatusCode {
     if s.ready.load(Ordering::Acquire) {
         StatusCode::OK
@@ -28,20 +41,20 @@ pub async fn ready(State(s): State<AppState>) -> StatusCode {
     }
 }
 
-const FRAUD_THRESHOLD: f32 = 0.6;
-
 pub async fn fraud_score(
     State(s): State<AppState>,
     Json(req): Json<FraudRequest>,
-) -> Json<FraudResponse> {
+) -> Response<Body> {
     let vector = vectorize(&req, &s.norm, &s.mcc_risk);
-    // Offload the CPU-bound KNN scan so the tokio thread stays free for I/O.
-    // On panic, default to fraud (score=1.0, approved=false) — avoids HTTP 500 weight-5 penalty.
-    let fraud_score = tokio::task::spawn_blocking(move || s.index.search(&vector))
+    // Default to 5 (all fraud) on panic — avoids HTTP 500 weight-5 scoring penalty.
+    let votes = tokio::task::spawn_blocking(move || s.index.search(&vector))
         .await
-        .unwrap_or(1.0);
-    Json(FraudResponse {
-        approved: fraud_score < FRAUD_THRESHOLD,
-        fraud_score,
-    })
+        .unwrap_or(5);
+    let body = FRAUD_BODIES[votes as usize];
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_LENGTH, body.len())
+        .body(Body::from(Bytes::from_static(body)))
+        .unwrap()
 }

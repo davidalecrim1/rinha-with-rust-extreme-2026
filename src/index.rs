@@ -1,6 +1,7 @@
 use crate::packed_ref::quantize;
 use crate::packed_ref::{query_cont_bytes, unpack_bits, PartialDists};
 use crate::simd;
+use std::cell::RefCell;
 #[cfg(test)]
 use std::time::Instant;
 
@@ -18,11 +19,41 @@ const DEFAULT_PRIMARY_NPROBE: usize = 4;
 const DEFAULT_REFINE_NPROBE: usize = 24;
 const DEFAULT_REPAIR_MAX_EXTRA_CLUSTERS: usize = 96;
 const DEFAULT_REPAIR_MAX_EXTRA_ROWS: usize = 120_000;
-type IvfMetadata = (Vec<[f32; 14]>, Vec<u32>, Vec<[i16; 14]>, Vec<[i16; 14]>);
+// Upper bound for stack-allocated top-n arrays. Any nprobe value beyond this
+// is clamped to MAX_NPROBE in practice (the env var parsing never sets it higher).
+const MAX_NPROBE: usize = 128;
+
+type IvfMetadata = (
+    Vec<[f32; 14]>,
+    Vec<f32>,
+    Vec<u32>,
+    Vec<[i16; 14]>,
+    Vec<[i16; 14]>,
+);
+
+// Per-thread scratch buffers reused across requests to eliminate per-request heap allocation.
+struct SearchBufs {
+    // Squared L2 distance from the query to each of the K centroids.
+    centroid_dists: Vec<f32>,
+    // Scratch for bbox-pruned repair candidates: (lower_bound, cluster_id).
+    repair_cands: Vec<(u64, u16)>,
+}
+
+thread_local! {
+    static SEARCH_BUFS: RefCell<SearchBufs> = RefCell::new(SearchBufs {
+        centroid_dists: vec![0.0f32; K],
+        repair_cands: Vec::with_capacity(K),
+    });
+}
 
 pub struct FraudIndex {
     rows: Vec<[u8; 16]>,
+    // Row-major centroids kept for non-x86_64 scalar fallback and bbox repair.
     centroids: Vec<[f32; 14]>,
+    // Column-major centroids for AVX2: centroids_col[d * K + ci] = centroid[ci][d].
+    // Only read on x86_64; allow dead_code on other architectures (dev machines).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    centroids_col: Vec<f32>,
     offsets: Vec<u32>,
     bbox_min: Vec<[i16; 14]>,
     bbox_max: Vec<[i16; 14]>,
@@ -51,7 +82,7 @@ impl FraudIndex {
             rows.push(chunk.try_into().unwrap());
         }
 
-        let (centroids, offsets, bbox_min, bbox_max) = Self::load_ivf_metadata();
+        let (centroids, centroids_col, offsets, bbox_min, bbox_max) = Self::load_ivf_metadata();
 
         let legacy_nprobe = std::env::var("NPROBE")
             .ok()
@@ -86,6 +117,7 @@ impl FraudIndex {
         FraudIndex {
             rows,
             centroids,
+            centroids_col,
             offsets,
             bbox_min,
             bbox_max,
@@ -99,6 +131,7 @@ impl FraudIndex {
 
     fn load_ivf_metadata() -> IvfMetadata {
         let cent_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/centroids.bin"));
+        let cent_col_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/centroids_col.bin"));
         let off_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_offsets.bin"));
         let bbox_min_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bbox_min.bin"));
         let bbox_max_raw: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bbox_max.bin"));
@@ -109,6 +142,13 @@ impl FraudIndex {
             "centroids.bin size mismatch: expected {}, got {}",
             K * 14 * 4,
             cent_raw.len()
+        );
+        assert_eq!(
+            cent_col_raw.len(),
+            K * 14 * 4,
+            "centroids_col.bin size mismatch: expected {}, got {}",
+            K * 14 * 4,
+            cent_col_raw.len()
         );
         assert_eq!(
             off_raw.len(),
@@ -142,6 +182,11 @@ impl FraudIndex {
             centroids.push(centroid);
         }
 
+        let centroids_col: Vec<f32> = cent_col_raw
+            .chunks_exact(4)
+            .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+            .collect();
+
         let mut offsets = Vec::with_capacity(K + 1);
         for i in 0..=K {
             let offset = i * 4;
@@ -164,12 +209,12 @@ impl FraudIndex {
             bbox_max.push(maxes);
         }
 
-        (centroids, offsets, bbox_min, bbox_max)
+        (centroids, centroids_col, offsets, bbox_min, bbox_max)
     }
 
-    /// Returns the fraud score for query vector `q` using k-NN with k=5.
-    pub fn search(&self, q: &[f32; 14]) -> f32 {
-        self.search_ivf(q).score
+    /// Returns the fraud vote count (0–5) for query vector `q` using k-NN with k=5.
+    pub fn search(&self, q: &[f32; 14]) -> u8 {
+        self.search_ivf(q).votes
     }
 
     fn search_ivf(&self, q: &[f32; 14]) -> IvfSearchStats {
@@ -188,15 +233,32 @@ impl FraudIndex {
         let primary_nprobe = primary_nprobe.clamp(1, K);
         let refine_nprobe = refine_nprobe.clamp(primary_nprobe, K);
 
-        let mut cdists: Vec<(f32, u16)> = Vec::with_capacity(K);
-        for (i, centroid) in self.centroids.iter().enumerate() {
-            cdists.push((l2_f32(q, centroid), i as u16));
-        }
+        // Stack arrays for top-N centroid selection; size is bounded by MAX_NPROBE.
+        let mut top_d = [f32::INFINITY; MAX_NPROBE];
+        let mut top_i = [0usize; MAX_NPROBE];
 
-        cdists.sort_unstable_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.cmp(&b.1))
+        // Fill per-centroid squared L2 distances using AVX2+FMA (x86_64) or scalar fallback,
+        // then select the top refine_nprobe cluster indices in ascending distance order.
+        // Thread-local buffer avoids the per-request heap allocation.
+        SEARCH_BUFS.with_borrow_mut(|bufs| {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                simd::compute_centroid_dists_avx2(
+                    q,
+                    &self.centroids_col,
+                    K,
+                    &mut bufs.centroid_dists,
+                );
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            simd::compute_centroid_dists_scalar(q, &self.centroids, K, &mut bufs.centroid_dists);
+
+            simd::top_n_into(
+                &bufs.centroid_dists,
+                K,
+                &mut top_d[..refine_nprobe],
+                &mut top_i[..refine_nprobe],
+            );
         });
 
         let q_cont = query_cont_bytes(q);
@@ -220,8 +282,7 @@ impl FraudIndex {
         let mut extra_clusters_scanned = 0usize;
         let mut extra_rows_scanned = 0usize;
 
-        for &(_, cluster_id) in &cdists[..primary_nprobe] {
-            let cluster_id = cluster_id as usize;
+        for &cluster_id in &top_i[..primary_nprobe] {
             let start = self.offsets[cluster_id] as usize;
             let end = self.offsets[cluster_id + 1] as usize;
             scanned[cluster_id] = true;
@@ -254,73 +315,84 @@ impl FraudIndex {
             && is_ambiguous(primary_fraud_votes)
         {
             let q_quantized = quantized_search_vector(q);
-            let mut repair_candidates: Vec<(u64, u16)> =
-                Vec::with_capacity(K.saturating_sub(primary_nprobe));
+            // Centroid distance of the refine_nprobe-th nearest centroid. Clusters within
+            // this distance are always eligible for repair (equivalent to rank < refine_nprobe).
+            let refine_threshold = top_d[refine_nprobe - 1];
 
-            for (rank, &(_, cluster_id)) in cdists.iter().enumerate() {
-                let cluster_id = cluster_id as usize;
-                if scanned[cluster_id] {
-                    continue;
+            // Build repair candidate list in the thread-local scratch buffer.
+            SEARCH_BUFS.with_borrow_mut(|bufs| {
+                bufs.repair_cands.clear();
+                for (cluster_id, &already_scanned) in scanned.iter().enumerate() {
+                    if already_scanned {
+                        continue;
+                    }
+                    let lower_bound = bbox_lower_bound_sq(
+                        &q_quantized,
+                        &self.bbox_min[cluster_id],
+                        &self.bbox_max[cluster_id],
+                    );
+                    // Skip only if both the centroid is beyond the refine window AND
+                    // the bbox lower bound already exceeds the current worst neighbor.
+                    if bufs.centroid_dists[cluster_id] > refine_threshold
+                        && lower_bound > worst_dist
+                    {
+                        continue;
+                    }
+                    bufs.repair_cands.push((lower_bound, cluster_id as u16));
                 }
+                bufs.repair_cands.sort_unstable_by_key(|&(lb, ci)| (lb, ci));
+            });
 
-                let lower_bound = bbox_lower_bound_sq(
-                    &q_quantized,
-                    &self.bbox_min[cluster_id],
-                    &self.bbox_max[cluster_id],
-                );
-                if rank >= refine_nprobe && lower_bound > worst_dist {
-                    continue;
+            // Scan repair candidates until budget is exhausted.
+            SEARCH_BUFS.with_borrow_mut(|bufs| {
+                for idx in 0..bufs.repair_cands.len() {
+                    if extra_clusters_scanned >= self.repair_max_extra_clusters {
+                        break;
+                    }
+                    let (lower_bound, cluster_id) = bufs.repair_cands[idx];
+                    if lower_bound > worst_dist {
+                        break;
+                    }
+
+                    let cluster_id = cluster_id as usize;
+                    let start = self.offsets[cluster_id] as usize;
+                    let end = self.offsets[cluster_id + 1] as usize;
+                    let cluster_rows = end - start;
+                    if extra_rows_scanned + cluster_rows > self.repair_max_extra_rows {
+                        break;
+                    }
+
+                    scanned[cluster_id] = true;
+                    #[cfg(test)]
+                    {
+                        clusters_scanned += 1;
+                        rows_scanned += cluster_rows;
+                    }
+                    extra_clusters_scanned += 1;
+                    extra_rows_scanned += cluster_rows;
+
+                    scan_rows(
+                        &self.rows[start..end],
+                        start as u32,
+                        &q_cont,
+                        &pd,
+                        #[cfg(target_arch = "x86_64")]
+                        q_simd,
+                        #[cfg(target_arch = "x86_64")]
+                        zero_lanes_mask,
+                        &mut neighbors,
+                        &mut worst_slot,
+                        &mut worst_dist,
+                    );
                 }
-
-                repair_candidates.push((lower_bound, cluster_id as u16));
-            }
-
-            repair_candidates
-                .sort_unstable_by_key(|&(lower_bound, cluster_id)| (lower_bound, cluster_id));
-
-            for (lower_bound, cluster_id) in repair_candidates {
-                if extra_clusters_scanned >= self.repair_max_extra_clusters {
-                    break;
-                }
-                if lower_bound > worst_dist {
-                    break;
-                }
-
-                let cluster_id = cluster_id as usize;
-                let start = self.offsets[cluster_id] as usize;
-                let end = self.offsets[cluster_id + 1] as usize;
-                let cluster_rows = end - start;
-                if extra_rows_scanned + cluster_rows > self.repair_max_extra_rows {
-                    break;
-                }
-
-                scanned[cluster_id] = true;
-                #[cfg(test)]
-                {
-                    clusters_scanned += 1;
-                    rows_scanned += cluster_rows;
-                }
-                extra_clusters_scanned += 1;
-                extra_rows_scanned += cluster_rows;
-
-                scan_rows(
-                    &self.rows[start..end],
-                    start as u32,
-                    &q_cont,
-                    &pd,
-                    #[cfg(target_arch = "x86_64")]
-                    q_simd,
-                    #[cfg(target_arch = "x86_64")]
-                    zero_lanes_mask,
-                    &mut neighbors,
-                    &mut worst_slot,
-                    &mut worst_dist,
-                );
-            }
+            });
         }
 
+        let v = fraud_votes(&neighbors);
         IvfSearchStats {
-            score: fraud_votes(&neighbors) as f32 / 5.0,
+            votes: v as u8,
+            #[cfg(test)]
+            score: v as f32 / 5.0,
             #[cfg(test)]
             refined: extra_clusters_scanned > 0,
             #[cfg(test)]
@@ -373,6 +445,8 @@ impl FraudIndex {
 }
 
 struct IvfSearchStats {
+    votes: u8,
+    #[cfg(test)]
     score: f32,
     #[cfg(test)]
     refined: bool,
@@ -525,16 +599,6 @@ fn bbox_lower_bound_sq(q: &[i16; 14], mins: &[i16; 14], maxes: &[i16; 14]) -> u6
     sum
 }
 
-#[inline(always)]
-fn l2_f32(a: &[f32; 14], b: &[f32; 14]) -> f32 {
-    let mut sum = 0.0f32;
-    for i in 0..14 {
-        let d = a[i] - b[i];
-        sum += d * d;
-    }
-    sum
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +612,7 @@ mod tests {
         FraudIndex {
             rows,
             centroids: Vec::new(),
+            centroids_col: Vec::new(),
             offsets: Vec::new(),
             bbox_min: Vec::new(),
             bbox_max: Vec::new(),
@@ -684,6 +749,13 @@ mod tests {
         centroids[0] = [0.0f32; 14];
         centroids[1] = [1.0f32; 14];
 
+        let mut centroids_col = vec![0.0f32; K * 14];
+        for (ci, c) in centroids.iter().enumerate() {
+            for d in 0..14 {
+                centroids_col[d * K + ci] = c[d];
+            }
+        }
+
         let primary_len = primary_entries.len() as u32;
         let total_len = rows.len() as u32;
         let mut offsets = vec![total_len; K + 1];
@@ -699,6 +771,7 @@ mod tests {
         FraudIndex {
             rows,
             centroids,
+            centroids_col,
             offsets,
             bbox_min,
             bbox_max,

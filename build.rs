@@ -208,9 +208,12 @@ fn l2_f32(a: &[f32; 14], b: &[f32; 14]) -> f32 {
 /// Convergence: <0.1% assignments changed, or max iterations reached.
 fn kmeans(vectors: &[[f32; 14]]) -> (Vec<[f32; 14]>, Vec<u32>) {
     use rand::seq::SliceRandom;
+    use rand::SeedableRng;
 
     let n = vectors.len();
-    let mut rng = rand::rng();
+    // Fixed seed for reproducibility: every build on every architecture
+    // produces the same clustering, ensuring consistent recall.
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 
     // Random initialization: pick K distinct vectors as initial centroids
     let mut indices: Vec<usize> = (0..n).collect();
@@ -374,6 +377,18 @@ fn main() {
     }
     std::fs::write(out_dir.join("centroids.bin"), &cent_blob)
         .expect("failed to write centroids.bin");
+
+    // Column-major layout for AVX2 centroid distance computation.
+    // centroids_col[d * K + ci] = centroids[ci][d]
+    // Contiguous storage per dimension allows 8-wide _mm256_loadu_ps loads.
+    let mut cent_col_blob: Vec<u8> = Vec::with_capacity(K * 14 * 4);
+    for d in 0..14 {
+        for centroid in &centroids {
+            cent_col_blob.extend_from_slice(&centroid[d].to_ne_bytes());
+        }
+    }
+    std::fs::write(out_dir.join("centroids_col.bin"), &cent_col_blob)
+        .expect("failed to write centroids_col.bin");
 
     let mut off_blob: Vec<u8> = Vec::with_capacity((K + 1) * 4);
     for &offset in &offsets {

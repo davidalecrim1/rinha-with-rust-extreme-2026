@@ -68,6 +68,111 @@ pub fn dist_cont_scalar(q_buf: &[u8; 16], r_buf: &[u8; 12]) -> u32 {
     sum as u32
 }
 
+/// Compute squared L2 distances from `query` to all `k` centroids using AVX2+FMA.
+///
+/// `centroids_col` is column-major: `centroids_col[d * k + ci]` holds dimension `d`
+/// of centroid `ci`. This layout lets each inner loop load 8 consecutive centroid
+/// values for the same dimension with a single `_mm256_loadu_ps`.
+///
+/// # Safety
+/// Caller must ensure AVX2 and FMA are available (guaranteed on Haswell+).
+/// `dists` must have length >= `k`. `centroids_col` must have length >= `14 * k`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn compute_centroid_dists_avx2(
+    query: &[f32; 14],
+    centroids_col: &[f32],
+    k: usize,
+    dists: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+
+    let dp = dists.as_mut_ptr();
+
+    // Zero the accumulator in 8-wide chunks.
+    let mut ci = 0usize;
+    while ci + 8 <= k {
+        _mm256_storeu_ps(dp.add(ci), _mm256_setzero_ps());
+        ci += 8;
+    }
+    while ci < k {
+        *dp.add(ci) = 0.0;
+        ci += 1;
+    }
+
+    // For each dimension, accumulate squared differences in 16-wide batches.
+    for d in 0..14usize {
+        let qd = _mm256_set1_ps(*query.get_unchecked(d));
+        let col = centroids_col.as_ptr().add(d * k);
+        let mut ci = 0usize;
+        while ci + 16 <= k {
+            let cv0 = _mm256_loadu_ps(col.add(ci));
+            let cv1 = _mm256_loadu_ps(col.add(ci + 8));
+            let d0 = _mm256_sub_ps(cv0, qd);
+            let d1 = _mm256_sub_ps(cv1, qd);
+            let a0 = _mm256_loadu_ps(dp.add(ci));
+            let a1 = _mm256_loadu_ps(dp.add(ci + 8));
+            _mm256_storeu_ps(dp.add(ci), _mm256_fmadd_ps(d0, d0, a0));
+            _mm256_storeu_ps(dp.add(ci + 8), _mm256_fmadd_ps(d1, d1, a1));
+            ci += 16;
+        }
+        while ci + 8 <= k {
+            let cv = _mm256_loadu_ps(col.add(ci));
+            let d0 = _mm256_sub_ps(cv, qd);
+            let a0 = _mm256_loadu_ps(dp.add(ci));
+            _mm256_storeu_ps(dp.add(ci), _mm256_fmadd_ps(d0, d0, a0));
+            ci += 8;
+        }
+        while ci < k {
+            let diff = *col.add(ci) - *query.get_unchecked(d);
+            *dp.add(ci) += diff * diff;
+            ci += 1;
+        }
+    }
+}
+
+/// Scalar centroid distance fallback for non-x86_64 hosts (Apple Silicon dev machines).
+/// Uses the row-major centroid layout.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn compute_centroid_dists_scalar(
+    query: &[f32; 14],
+    centroids: &[[f32; 14]],
+    k: usize,
+    dists: &mut [f32],
+) {
+    for (ci, centroid) in centroids[..k].iter().enumerate() {
+        let mut d = 0.0f32;
+        for dim in 0..14 {
+            let diff = query[dim] - centroid[dim];
+            d += diff * diff;
+        }
+        dists[ci] = d;
+    }
+}
+
+/// Populate `out_d[..n]` with the n smallest values from `dists[..k]` and
+/// `out_i[..n]` with their original indices, both in ascending distance order.
+///
+/// n = out_d.len() must equal out_i.len() and be > 0.
+/// Slots for which k < n remain as INFINITY / 0 respectively.
+pub fn top_n_into(dists: &[f32], k: usize, out_d: &mut [f32], out_i: &mut [usize]) {
+    let n = out_d.len();
+    debug_assert_eq!(out_i.len(), n);
+    if n == 0 {
+        return;
+    }
+    out_d.fill(f32::INFINITY);
+    for (ci, &d) in dists[..k].iter().enumerate() {
+        if d < out_d[n - 1] {
+            let pos = out_d[..n - 1].partition_point(|&x| x <= d);
+            out_d[pos..].rotate_right(1);
+            out_d[pos] = d;
+            out_i[pos..].rotate_right(1);
+            out_i[pos] = ci;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

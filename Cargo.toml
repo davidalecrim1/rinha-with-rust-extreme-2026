@@ -8,6 +8,7 @@ profiling = ["dep:pprof"]
 
 [dependencies]
 axum       = "0.8"
+bytes      = "1"
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"

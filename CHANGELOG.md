@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.5
+- AVX2+FMA column-major centroid distance computation; thread-local scratch buffers eliminate per-request heap allocation for centroid distances and repair candidates
+- Prebuilt static HTTP responses indexed by fraud vote count (0–5); zero serde_json on the hot path
+- Official load test: final score 4343.84, p99 23.44ms, 0 HTTP errors, 2 false positives, 2 false negatives
+
 ## v0.8.4
 - Remove the brute-force production path and keep IVF as the only search mode
 - Drop the uncapped overlay, add the compose helpers to the release flow, and simplify the build path by removing optional IVF feature toggles
